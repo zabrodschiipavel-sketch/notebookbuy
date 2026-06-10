@@ -23,6 +23,15 @@ _DEFAULT_GPU_TIER = {"price": 0, "score": 0}
 _components_cache: dict | None = None
 
 
+def external_cache_key(cpu: str, gpu: str, ram: int) -> str:
+    """Key for the world-price/NBC JSON caches.
+
+    The analyzer writes these caches and the dashboard/notifier read them, so
+    all three must build the key identically.
+    """
+    return f"{str(cpu or '')[:25]}_{str(gpu or '')[:15]}_{ram}"
+
+
 def load_components_db(path: str = COMPONENTS_DB_FILE) -> dict:
     """Load (and memoize) component pricing/scoring data from JSON."""
     global _components_cache

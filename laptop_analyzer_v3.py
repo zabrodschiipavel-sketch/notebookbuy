@@ -24,7 +24,11 @@ from app_config import (
 )
 from benchmarks import HardwareBenchmarker
 from db import init_database
-from estimation import estimate_fallback_price, estimate_fallback_score
+from estimation import (
+    estimate_fallback_price,
+    estimate_fallback_score,
+    external_cache_key,
+)
 from parser import LaptopParser
 from scoring import (
     ANALYSIS_VERSION,
@@ -117,8 +121,8 @@ class LaptopAnalyzer:
             # Use ThreadPoolExecutor for parallel search
             def process_laptop_external(lap: dict):
                 nonlocal dirty
-                # Improved cache key: CPU + GPU + RAM
-                key = f"{lap['cpu'][:25]}_{lap['gpu'][:15]}_{lap['ram']}"
+                # Cache key: CPU + GPU + RAM (shared with dashboard/notifier)
+                key = external_cache_key(lap['cpu'], lap['gpu'], lap['ram'])
 
                 p_data = price_cache.get(key)
                 if not p_data:

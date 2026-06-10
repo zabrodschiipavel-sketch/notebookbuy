@@ -1,3 +1,4 @@
+import html
 import json
 import logging
 import os
@@ -9,7 +10,11 @@ import requests
 
 # Import shared configurations and scoring
 from app_config import DB_NAME
-from estimation import estimate_fallback_price, estimate_fallback_score
+from estimation import (
+    estimate_fallback_price,
+    estimate_fallback_score,
+    external_cache_key,
+)
 from scoring import MDL_USD_RATE, infer_ssd_gb, is_unwanted_ad, score_laptop
 
 
@@ -109,13 +114,13 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
         )
         value_score = round(score_res.get("value_score", 0), 1)
 
-        # vs World calculation
-        ad_id_str = str(r['id'])
+        # vs World calculation — caches are keyed by CPU+GPU+RAM (see analyzer)
+        cache_key = external_cache_key(r['cpu'], r['gpu'], r['ram'])
         vs_pct = 0.0
         vs_str = "—"
 
         # Check cache
-        cache_data = price_cache.get(ad_id_str, {})
+        cache_data = price_cache.get(cache_key, {})
         world_price_usd = cache_data.get('current_usd')
 
         if not world_price_usd:
@@ -131,7 +136,7 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
                 vs_str = f"{int(round(vs_pct))}%"
 
         # NBC Score
-        nbc_data = nbc_cache.get(ad_id_str, {})
+        nbc_data = nbc_cache.get(cache_key, {})
         nbc_score = nbc_data.get('score')
         if not nbc_score:
             nbc_score = estimate_fallback_score(r['cpu'], r['gpu'], r['ram'], components_data)
@@ -144,7 +149,7 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
             risk = "⚠️ Высокий (Скам/Блок)"
         elif brand != 'Apple' and vs_pct < -65:
             risk = "⚠️ Подозрительно дешево"
-        elif r['price'] < 2000 and r['year_est'] > 2019:
+        elif r['price'] < 2000 and (r['year_est'] or 0) > 2019:
             risk = "⚠️ На запчасти?"
 
         # Smart runtime SSD fallback for display/processing
@@ -167,6 +172,27 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
                 'region': extract_region(r['description'] if 'description' in r.keys() else '')
             })
     return deals
+
+
+def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
+    """Render one deal as Telegram HTML. User-supplied text is escaped so
+    listing titles with *, _, [, < etc. cannot break the markup."""
+    brand_emoji = "🍏" if deal['brand'] == "Apple" else "💻"
+    title = html.escape(deal['title'][:80])
+    specs = html.escape(f"{deal['cpu']} | {deal['ram']}GB RAM | {deal['ssd']}GB SSD")
+    lines = [f"{idx}. {brand_emoji} <b>{title}</b>"]
+    if show_region:
+        lines.append(f" 📍 <b>Регион:</b> <code>{html.escape(deal['region'])}</code>")
+    lines += [
+        f" 💰 <b>Цена:</b> {deal['price']:,} MDL",
+        f" 📈 <b>Выгода:</b> <code>{html.escape(deal['vs_str'])} vs World</code>",
+        f" 🎯 <b>NBC Score:</b> <code>{deal['nbc_score']}%</code> | <b>Value Score:</b> <code>{deal['value_score']}</code>",
+        f" 🛠 <b>Характеристики:</b> <code>{specs}</code>",
+    ]
+    if deal.get('risk'):
+        lines.append(f" 🚨 <b>РИСК:</b> <code>{html.escape(deal['risk'])}</code>")
+    lines.append(f" 🔗 <a href=\"{html.escape(deal['url'], quote=True)}\">Открыть объявление</a>")
+    return "\n".join(lines) + "\n\n"
 
 
 def main():
@@ -210,48 +236,31 @@ def main():
     balti_deals = [d for d in deals if d['region'] == "Бельцы"]
     balti_deals = sorted(balti_deals, key=lambda x: x['value_score'], reverse=True)[:5]
 
-    # Format beautiful message
-    message = "🔥 *ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD* 🔥\n"
-    message += f"📅 _Дата отчета: {datetime.now().strftime('%d.%m.%Y %H:%M')}_\n\n"
+    # Format beautiful message (Telegram HTML — robust to special chars in titles)
+    message = "🔥 <b>ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD</b> 🔥\n"
+    message += f"📅 <i>Дата отчета: {datetime.now().strftime('%d.%m.%Y %H:%M')}</i>\n\n"
 
     # Moldova Section
-    message += "🌍 *ВСЯ МОЛДОВА (ТОП-5)*\n"
+    message += "🌍 <b>ВСЯ МОЛДОВА (ТОП-5)</b>\n"
     message += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     for idx, d in enumerate(moldova_deals, start=1):
-        brand_emoji = "🍏" if d['brand'] == "Apple" else "💻"
-        message += f"{idx}. {brand_emoji} *{d['title']}*\n"
-        message += f" 📍 *Регион:* `{d['region']}`\n"
-        message += f" 💰 *Цена:* {d['price']:,} MDL\n"
-        message += f" 📈 *Выгода:* `{d['vs_str']} vs World`\n"
-        message += f" 🎯 *NBC Score:* `{d['nbc_score']}%` | *Value Score:* `{d['value_score']}`\n"
-        message += f" 🛠 *Характеристики:* `{d['cpu']} | {d['ram']}GB RAM | {d['ssd']}GB SSD`\n"
-        if d.get('risk'):
-            message += f" 🚨 *РИСК:* `{d['risk']}`\n"
-        message += f" 🔗 [Открыть объявление]({d['url']})\n\n"
+        message += format_deal(idx, d, show_region=True)
 
     # Balti Section
-    message += "\n🔔 *БЕЛЬЦЫ (ТОП-5)*\n"
+    message += "\n🔔 <b>БЕЛЬЦЫ (ТОП-5)</b>\n"
     message += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     if balti_deals:
         for idx, d in enumerate(balti_deals, start=1):
-            brand_emoji = "🍏" if d['brand'] == "Apple" else "💻"
-            message += f"{idx}. {brand_emoji} *{d['title']}*\n"
-            message += f" 💰 *Цена:* {d['price']:,} MDL\n"
-            message += f" 📈 *Выгода:* `{d['vs_str']} vs World`\n"
-            message += f" 🎯 *NBC Score:* `{d['nbc_score']}%` | *Value Score:* `{d['value_score']}`\n"
-            message += f" 🛠 *Характеристики:* `{d['cpu']} | {d['ram']}GB RAM | {d['ssd']}GB SSD`\n"
-            if d.get('risk'):
-                message += f" 🚨 *РИСК:* `{d['risk']}`\n"
-            message += f" 🔗 [Открыть объявление]({d['url']})\n\n"
+            message += format_deal(idx, d, show_region=False)
     else:
-        message += "   _Выгодных предложений в Бельцах пока не найдено._\n\n"
+        message += "   <i>Выгодных предложений в Бельцах пока не найдено.</i>\n\n"
 
     log.info("Sending message to Telegram...")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
 
