@@ -9,7 +9,7 @@ from datetime import datetime
 import requests
 
 # Import shared configurations and scoring
-from app_config import DB_NAME
+from app_config import AI_REVIEW_TOP_N, DB_NAME, ENABLE_AI_REVIEW
 from estimation import (
     estimate_fallback_price,
     estimate_fallback_score,
@@ -158,6 +158,7 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
         # We want to filter for good value_score
         if value_score >= MIN_VALUE_SCORE:
             deals.append({
+                'id': r['id'],
                 'title': title,
                 'price': int(r['price']),
                 'url': r['url'],
@@ -169,9 +170,38 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
                 'ssd': ssd_val,
                 'brand': brand,
                 'risk': risk,
-                'region': extract_region(r['description'] if 'description' in r.keys() else '')
+                'region': extract_region(description),
+                'description': description or '',
             })
     return deals
+
+
+def apply_ai_review(deals: list[dict], reviews: dict[str, dict]) -> list[dict]:
+    """Apply Gemini Pro verdicts to the deal list.
+
+    'exclude' drops the deal entirely; other verdicts attach a short note that
+    format_deal renders. Deals without a review pass through unchanged, so an
+    empty review dict (AI disabled/failed) leaves the digest as-is.
+    """
+    if not reviews:
+        return deals
+
+    note_emoji = {"great": "✅", "ok": "👌", "suspicious": "⚠️"}
+    kept = []
+    for deal in deals:
+        review = reviews.get(str(deal.get("id")))
+        if not review:
+            kept.append(deal)
+            continue
+        verdict = str(review.get("verdict", "")).lower()
+        reason = str(review.get("reason", "")).strip()
+        if verdict == "exclude":
+            log.info("AI review excluded: %s (%s)", deal["title"][:40], reason)
+            continue
+        if reason:
+            deal = {**deal, "ai_note": f"{note_emoji.get(verdict, '🤖')} {reason}"}
+        kept.append(deal)
+    return kept
 
 
 def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
@@ -191,6 +221,8 @@ def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
     ]
     if deal.get('risk'):
         lines.append(f" 🚨 <b>РИСК:</b> <code>{html.escape(deal['risk'])}</code>")
+    if deal.get('ai_note'):
+        lines.append(f" 🤖 <b>Gemini:</b> <i>{html.escape(deal['ai_note'])}</i>")
     lines.append(f" 🔗 <a href=\"{html.escape(deal['url'], quote=True)}\">Открыть объявление</a>")
     return "\n".join(lines) + "\n\n"
 
@@ -229,12 +261,30 @@ def main():
         log.info("No high-value laptop deals found today.")
         return
 
+    deals.sort(key=lambda x: x['value_score'], reverse=True)
+
+    # Second-pass review of the top candidates with Gemini Pro: drops scam
+    # listings and parsing garbage that the regex/score pipeline lets through.
+    if ENABLE_AI_REVIEW and AI_REVIEW_TOP_N > 0:
+        # Imported lazily: pulls google-genai, needed only when review is on.
+        from ai_service import AIService
+
+        candidates = deals[:AI_REVIEW_TOP_N]
+        log.info("Reviewing top %d deals with Gemini Pro...", len(candidates))
+        reviews = AIService().review_deals(candidates)
+        if reviews:
+            deals = apply_ai_review(deals, reviews)
+            log.info("AI review applied: %d deals remain", len(deals))
+
+    if not deals:
+        log.info("All candidate deals were rejected by AI review; nothing to send.")
+        return
+
     # 1. Moldova deals (all regions) - Top 5
-    moldova_deals = sorted(deals, key=lambda x: x['value_score'], reverse=True)[:5]
+    moldova_deals = deals[:5]
 
     # 2. Balti deals - Top 5
-    balti_deals = [d for d in deals if d['region'] == "Бельцы"]
-    balti_deals = sorted(balti_deals, key=lambda x: x['value_score'], reverse=True)[:5]
+    balti_deals = [d for d in deals if d['region'] == "Бельцы"][:5]
 
     # Format beautiful message (Telegram HTML — robust to special chars in titles)
     message = "🔥 <b>ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD</b> 🔥\n"

@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- AI review of the Telegram digest: the top candidates are passed through
+  Gemini Pro (`gemini-pro-latest`, falls back to `gemini-flash-latest` on
+  free-tier keys) which excludes scam listings and parsing garbage and adds a
+  short verdict line per deal. Configured via `ENABLE_AI_REVIEW`,
+  `AI_REVIEW_TOP_N`, `GEMINI_PRO_MODEL`, `GEMINI_REVIEW_FALLBACK_MODEL`.
+  Motivated by 3 weeks of digest history where a fake 600-MDL "Maci Brook pro"
+  and a "Xiaomi with Apple M2" (regex caught `m.2` from the SSD spec) held
+  top-5 spots for days.
 - Tests for price tracking, GraphQL parsing, fallback estimation, benchmark
   lookup, and the SSD heuristic (suite: 36 → 63).
 - Test coverage for the Telegram digest (`process_deals`, `format_deal`):

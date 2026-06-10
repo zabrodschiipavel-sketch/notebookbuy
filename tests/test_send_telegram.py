@@ -1,6 +1,6 @@
 """Tests for the Telegram digest: deal selection, cache lookup, formatting."""
 from estimation import external_cache_key
-from send_telegram import format_deal, process_deals
+from send_telegram import apply_ai_review, format_deal, process_deals
 
 
 COMPONENTS = {
@@ -108,6 +108,46 @@ def test_format_deal_escapes_html_in_title():
     text = format_deal(1, deal)
     assert "&lt;b&gt;50% *скидка*&lt;/b&gt; &amp; подарок" in text
     assert 'href="https://999.md/ru/1"' in text
+
+
+def test_apply_ai_review_excludes_and_annotates():
+    deals = [
+        {"id": 1, "title": "Maci Brook pro", "value_score": 200.0},
+        {"id": 2, "title": "Lenovo Legion 5", "value_score": 150.0},
+        {"id": 3, "title": "No review for this one", "value_score": 120.0},
+    ]
+    reviews = {
+        "1": {"verdict": "exclude", "reason": "цена в 30 раз ниже рынка, скам"},
+        "2": {"verdict": "great", "reason": "спеки согласованы, честная цена"},
+    }
+    result = apply_ai_review(deals, reviews)
+    assert [d["id"] for d in result] == [2, 3]
+    assert result[0]["ai_note"] == "✅ спеки согласованы, честная цена"
+    assert "ai_note" not in result[1]
+
+
+def test_apply_ai_review_empty_reviews_is_noop():
+    deals = [{"id": 1, "title": "x", "value_score": 150.0}]
+    assert apply_ai_review(deals, {}) is deals
+
+
+def test_format_deal_renders_ai_note():
+    deal = {
+        "title": "Lenovo", "price": 5000, "url": "https://999.md/ru/1",
+        "value_score": 150.0, "vs_str": "-20%", "nbc_score": 80,
+        "cpu": "i7", "ram": 16, "ssd": 512, "brand": "LENOVO",
+        "risk": "", "region": "Кишинёв",
+        "ai_note": "⚠️ проверьте, продаётся ли сам ноутбук",
+    }
+    text = format_deal(1, deal)
+    assert "Gemini:" in text
+    assert "проверьте, продаётся ли сам ноутбук" in text
+
+
+def test_process_deals_includes_id_and_description():
+    deals = process_deals([make_row()], {}, {}, COMPONENTS)
+    assert deals[0]["id"] == 1
+    assert deals[0]["description"] == "[Region: Bălți]"
 
 
 def test_format_deal_region_only_in_moldova_section():

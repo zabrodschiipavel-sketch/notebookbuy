@@ -41,6 +41,16 @@ def _env_float(key: str, default: float) -> float:
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
+# Stronger model used to sanity-check the final top before it is sent.
+# NOTE: pro models need a billing-enabled API key; on the free tier the review
+# automatically falls back to GEMINI_REVIEW_FALLBACK_MODEL.
+GEMINI_PRO_MODEL = os.getenv("GEMINI_PRO_MODEL", "gemini-pro-latest")
+GEMINI_REVIEW_FALLBACK_MODEL = os.getenv("GEMINI_REVIEW_FALLBACK_MODEL", "gemini-flash-latest")
+
+# AI review of the Telegram digest top: catches scam listings and parsing
+# garbage (e.g. "Xiaomi with Apple M2", 128GB RAM from a 128GB SSD).
+ENABLE_AI_REVIEW = _env_bool("ENABLE_AI_REVIEW", True)
+AI_REVIEW_TOP_N = max(0, _env_int("AI_REVIEW_TOP_N", 15))
 
 GEMINI_MAX_WORKERS = max(1, _env_int("GEMINI_MAX_WORKERS", 3))
 GEMINI_REQUEST_DELAY_SEC = max(0.0, _env_float("GEMINI_REQUEST_DELAY_SEC", 0.5))

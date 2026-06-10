@@ -65,10 +65,12 @@ jobs:
           key: scraper-db-cache-${{ github.run_id }}
 
       # Отправляем сводку лучших сделок в Telegram
+      # (GEMINI_API_KEY нужен для финального ревью топа через Gemini Pro)
       - name: Send Telegram Notification
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python send_telegram.py
 
