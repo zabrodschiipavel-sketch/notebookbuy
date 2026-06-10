@@ -44,7 +44,6 @@ GPU_REGEX = re.compile(
 )
 
 RAM_REGEX = re.compile(r'\b(4|6|8|12|16|24|32|48|64|128)\s*(?:gb|гб|g)\b')
-SSD_REGEX = re.compile(r'\b(128|256|500|512|1000|1024|2000|2048|1|2|4)\s*(?:tb|тб|gb|гб|t|g)?\s*(?:ssd|nvme|hdd|ссд|m\.2|pcie)\b')
 YEAR_REGEX = re.compile(r'\b(20(?:0[8-9]|1[0-9]|2[0-5]))\b') # Years from 2008 to 2025
 
 

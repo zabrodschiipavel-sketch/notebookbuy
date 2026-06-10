@@ -12,6 +12,11 @@ from bs4 import BeautifulSoup
 
 from app_config import DB_NAME
 from db import init_database
+from estimation import (
+    estimate_fallback_price,
+    estimate_fallback_score,
+    external_cache_key,
+)
 from scoring import (
     MAX_PRICE_MDL,
     MDL_USD_RATE,  # Import MDL_USD_RATE from scoring
@@ -456,7 +461,7 @@ if selected_id:
 st.subheader("📋 Deals Table")
 
 def get_external_info(row):
-    key = f"{str(row['cpu'])[:25]}_{str(row['gpu'])[:15]}_{row['ram']}"
+    key = external_cache_key(row['cpu'], row['gpu'], row['ram'])
     wp = price_cache.get(key, {})
     nbc = nbc_cache.get(key, {})
 
@@ -469,52 +474,8 @@ def get_external_info(row):
     score = f"{nbc.get('score')}%" if nbc.get('score') else "—"
     return pd.Series([vs_pct, score], index=["vs World", "NBC Score"])
 
-# --- Fallback Logic Start ---
-CPU_TIERS = {
-    'premium': {
-        'keywords': ['core ultra 7', 'core ultra 9', 'i9', 'ryzen 9', 'm3 pro', 'm2 pro', 'm3 max', 'm2 max'],
-        'price': 500,
-        'score': 90
-    },
-    'high': {
-        'keywords': ['i7', 'ryzen 7', 'core ultra 5', 'm1 pro', 'm1 max', 'm2', 'm3'],
-        'price': 350,
-        'score': 80
-    },
-    'mid': {
-        'keywords': ['i5', 'ryzen 5', 'm1'],
-        'price': 200,
-        'score': 70
-    },
-    'entry': {
-        'keywords': ['i3', 'ryzen 3'],
-        'price': 100,
-        'score': 55
-    },
-    'low': {
-        'keywords': ['celeron', 'pentium', 'athlon'],
-        'price': 40,
-        'score': 35
-    }
-}
-
-GPU_TIERS = {
-    'high': {
-        'keywords': ['rtx 4090', 'rtx 4080', 'rtx 4070', 'rtx 3080', 'rtx 3080 ti', 'rtx 3070', 'rtx 3070 ti', 'rx 7800', 'rx 7900'],
-        'price': 600,
-        'score': 10
-    },
-    'mid': {
-        'keywords': ['rtx 4060', 'rtx 4050', 'rtx 3060', 'rtx 3050', 'rx 7600', 'rx 6600'],
-        'price': 300,
-        'score': 5
-    },
-    'entry': {
-        'keywords': ['gtx 1650', 'rtx 2050', 'mx450', 'mx550', 'gtx 1660'],
-        'price': 100,
-        'score': 2
-    }
-}
+# Fallback estimation lives in estimation.py (shared with the analyzer and
+# the Telegram notifier) so the three surfaces cannot drift apart.
 
 def safe_to_float(val, default=0.0):
     try:
@@ -526,64 +487,8 @@ def safe_to_float(val, default=0.0):
     except (ValueError, TypeError):
         return default
 
-def get_cpu_tier(cpu_name):
-    cpu_str = str(cpu_name).lower()
-    for _tier, data in CPU_TIERS.items():
-        if any(kw in cpu_str for kw in data['keywords']):
-            return data
-    return CPU_TIERS['entry']
-
-def get_gpu_tier(gpu_name):
-    gpu_str = str(gpu_name).lower()
-    for _tier, data in GPU_TIERS.items():
-        if any(kw in gpu_str for kw in data['keywords']):
-            return data
-    return {'price': 0, 'score': 0}
-
-def estimate_fallback_price(cpu, gpu, ram, ssd, brand=""):
-    base_chassis_price = 200
-
-    # Apple Tax
-    if str(brand).lower() == 'apple':
-        base_chassis_price += 300
-
-    cpu_data = get_cpu_tier(cpu)
-    gpu_data = get_gpu_tier(gpu)
-
-    ram_gb = safe_to_float(ram)
-    ram_gb = min(ram_gb, 16.0) # Limit RAM cost factor
-
-    ssd_gb = safe_to_float(ssd)
-    if ssd_gb <= 0:
-        ssd_gb = 512.0
-    ssd_gb = min(ssd_gb, 512.0) # Limit SSD cost factor
-
-    ram_price = ram_gb * 4
-    ssd_price = (ssd_gb / 128) * 10
-
-    total_usd = base_chassis_price + cpu_data['price'] + gpu_data['price'] + ram_price + ssd_price
-    return int(total_usd * MDL_USD_RATE)
-
-def estimate_fallback_score(cpu, gpu, ram):
-    cpu_str = str(cpu).lower()
-    if any(m in cpu_str for m in ('m1', 'm2', 'm3', 'm4')):
-        if any(p in cpu_str for p in ('pro', 'max', 'ultra')):
-            return 90
-        return 80
-
-    cpu_data = get_cpu_tier(cpu)
-    gpu_data = get_gpu_tier(gpu)
-    ram_gb = safe_to_float(ram)
-
-    score = cpu_data['score'] + gpu_data['score']
-    if ram_gb >= 16:
-        score += 3
-
-    return int(min(100, max(1, score)))
-
 def is_missing(val):
     return pd.isna(val) or val == '—' or val == ''
-# --- Fallback Logic End ---
 
 ext_df = filtered_df.apply(get_external_info, axis=1)
 display_df = pd.concat([filtered_df, ext_df], axis=1)
@@ -591,19 +496,21 @@ display_df = pd.concat([filtered_df, ext_df], axis=1)
 # Apply fallback logic
 for idx, row in display_df.iterrows():
     if is_missing(row.get('NBC Score')):
-        fallback_score = estimate_fallback_score(row['cpu'], row['gpu'], row['ram'])
+        fallback_score = estimate_fallback_score(row['cpu'], row['gpu'], safe_to_float(row['ram']))
         display_df.at[idx, 'NBC Score'] = f"{fallback_score}%"
 
     if is_missing(row.get('vs World')):
         site_price = safe_to_float(row.get('price'), default=0)
         if site_price > 0:
-            calc_price_mdl = estimate_fallback_price(row['cpu'], row['gpu'], row['ram'], row['ssd'], row.get('brand', ''))
-            vs_world_percent = ((site_price - calc_price_mdl) / calc_price_mdl) * 100
-
-            if vs_world_percent > 0:
-                display_df.at[idx, 'vs World'] = f"+{int(round(vs_world_percent))}%"
-            else:
-                display_df.at[idx, 'vs World'] = f"{int(round(vs_world_percent))}%"
+            calc_price_mdl = estimate_fallback_price(
+                row['cpu'], row['gpu'],
+                safe_to_float(row['ram']), safe_to_float(row['ssd']),
+                brand=row.get('brand', ''),
+            )
+            if calc_price_mdl > 0:
+                vs_world_percent = ((site_price - calc_price_mdl) / calc_price_mdl) * 100
+                sign = "+" if vs_world_percent > 0 else ""
+                display_df.at[idx, 'vs World'] = f"{sign}{int(round(vs_world_percent))}%"
 
 def calculate_risk(row):
     risk = ""

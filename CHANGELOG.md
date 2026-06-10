@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Decomposed `lappars.fetch_and_process` into small, unit-tested helpers
   (`parse_graphql_ad`, `_html_fallback_description`).
 - `send_telegram.py` now uses `logging` instead of `print`.
+- The Telegram digest renders with Telegram HTML instead of Markdown, with all
+  listing-supplied text escaped — titles containing `*`, `_`, `[` or `<` can
+  no longer break the markup or fail the send.
+- The dashboard's duplicated fallback price/score tiers were removed in favor
+  of the shared `estimation.py` + `components_db.json` (the local copy had
+  already drifted from what the analyzer and notifier used).
+- The world-price/NBC cache key is built by a single helper
+  (`estimation.external_cache_key`) shared by the analyzer, dashboard, and
+  notifier.
+- `daily_scrape.yml` uses explicit `actions/cache/restore` + `cache/save`
+  (with `if: always()`) instead of two conflicting `actions/cache` steps, so
+  scraped data survives even when a later step fails.
 
 ### Fixed
 
@@ -25,11 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `daily_scrape.yml` no longer references a non-existent `requirements.txt`.
 - Register an explicit SQLite datetime adapter to silence the Python 3.12
   deprecation warning without changing stored timestamp format.
+- `send_telegram.py` looked up the world-price/NBC caches by ad id while the
+  analyzer writes them keyed by CPU+GPU+RAM — the cache never hit and the
+  digest always used the rough component fallback.
+- `send_telegram.py` no longer crashes with a `TypeError` on listings whose
+  year could not be estimated (`year_est` NULL) when evaluating the
+  "На запчасти?" risk.
 
 ### Added
 
 - Tests for price tracking, GraphQL parsing, fallback estimation, benchmark
   lookup, and the SSD heuristic (suite: 36 → 63).
+- Test coverage for the Telegram digest (`process_deals`, `format_deal`):
+  cache-key lookup, missing year, MDM risk, unwanted-ad filtering, region
+  parsing, and HTML escaping (suite: 63 → 70).
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` documented in `.env.example`.
 
 ## [1.0.0] - 2026-05-17
 

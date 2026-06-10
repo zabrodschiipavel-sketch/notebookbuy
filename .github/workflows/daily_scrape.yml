@@ -28,7 +28,7 @@ jobs:
 
       # Восстанавливаем БД и кэш-файлы из кэша GitHub Actions
       - name: Restore Scraper Cache & DB
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             laptops_database.db
@@ -53,8 +53,10 @@ jobs:
           python laptop_analyzer_v3.py
 
       # Сохраняем обновленную БД и кэш-файлы обратно в кэш
+      # (даже если последующие шаги упадут — собранные данные не теряются)
       - name: Save Scraper Cache & DB
-        uses: actions/cache@v4
+        if: always()
+        uses: actions/cache/save@v4
         with:
           path: |
             laptops_database.db
