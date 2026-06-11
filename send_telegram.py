@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime
 
 import requests
+from rapidfuzz import fuzz
 
 # Import shared configurations and scoring
 from app_config import AI_REVIEW_TOP_N, DB_NAME, ENABLE_AI_REVIEW
@@ -14,6 +15,7 @@ from estimation import (
     estimate_fallback_price,
     estimate_fallback_score,
     external_cache_key,
+    plausible_nbc_score,
 )
 from scoring import MDL_USD_RATE, infer_ssd_gb, is_unwanted_ad, score_laptop
 
@@ -39,6 +41,8 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 WORLD_PRICE_CACHE = "pricehistory_cache.json"
 NBC_CACHE_FILE = "notebookcheck_cache.json"
 COMPONENTS_DB_FILE = "components_db.json"
+# Which ads already appeared in previous digests (persisted between runs).
+DIGEST_HISTORY_FILE = "digest_history.json"
 
 
 def load_json_cache(filename):
@@ -139,9 +143,10 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
                 vs_pct = ((r['price'] - world_price_mdl) / world_price_mdl) * 100
                 vs_str = f"{int(round(vs_pct))}%"
 
-        # NBC Score
+        # NBC Score — only a plausible Notebookcheck rating is trusted; the
+        # AI search hallucinates values like 12% that flip to 80% a run later.
         nbc_data = nbc_cache.get(cache_key, {})
-        nbc_score = nbc_data.get('score')
+        nbc_score = plausible_nbc_score(nbc_data.get('score'))
         if not nbc_score:
             nbc_score = estimate_fallback_score(r['cpu'], r['gpu'], r['ram'], components_data)
 
@@ -178,6 +183,68 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
                 'description': description or '',
             })
     return deals
+
+
+def dedupe_deals(deals: list[dict]) -> list[dict]:
+    """Collapse re-posted listings: same parsed specs + similar title.
+
+    Sellers re-post the same laptop under new ad ids; with identical
+    CPU/RAM/SSD and a fuzzy-matching title only the best-ranked copy stays
+    (callers pass deals sorted by value_score descending).
+    """
+    kept: list[dict] = []
+    for deal in deals:
+        is_dup = any(
+            str(deal['cpu']).lower() == str(k['cpu']).lower()
+            and deal['ram'] == k['ram']
+            and deal['ssd'] == k['ssd']
+            and fuzz.token_set_ratio(deal['title'].lower(), k['title'].lower()) >= 85
+            for k in kept
+        )
+        if not is_dup:
+            kept.append(deal)
+    return kept
+
+
+def _short_date(iso_date: str) -> str:
+    try:
+        return datetime.strptime(iso_date, "%Y-%m-%d").strftime("%d.%m")
+    except ValueError:
+        return iso_date
+
+
+def annotate_with_history(deals: list[dict], history: dict, today: str) -> None:
+    """Mark each deal as new or repeated (with price delta) vs. past digests."""
+    for deal in deals:
+        prev = history.get(str(deal.get("id")))
+        if not prev:
+            deal["seen_note"] = "🆕 Впервые в топе"
+            continue
+        if prev.get("first_seen") == today:
+            deal["seen_note"] = ""  # first appeared earlier today — skip the noise
+            continue
+        note = f"🔁 В топе с {_short_date(prev.get('first_seen', '?'))}"
+        old_price = prev.get("price") or 0
+        delta = deal["price"] - old_price
+        if old_price and abs(delta) / old_price > 0.01:
+            arrow = "📉" if delta < 0 else "📈"
+            note += f", цена {arrow} {old_price:,} → {deal['price']:,} MDL"
+        deal["seen_note"] = note
+
+
+def update_history(history: dict, sent_deals: list[dict], today: str) -> dict:
+    """Record sent deals; keep entries fresh enough to matter (45 days)."""
+    for deal in sent_deals:
+        key = str(deal.get("id"))
+        prev = history.get(key, {})
+        history[key] = {
+            "first_seen": prev.get("first_seen", today),
+            "last_seen": today,
+            "price": deal["price"],
+        }
+    cutoff = sorted({v.get("last_seen", "") for v in history.values()}, reverse=True)[:45]
+    keep_dates = set(cutoff)
+    return {k: v for k, v in history.items() if v.get("last_seen", "") in keep_dates}
 
 
 def apply_ai_review(deals: list[dict], reviews: dict[str, dict]) -> list[dict]:
@@ -244,6 +311,8 @@ def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
         lines.append(f" 🚨 <b>РИСК:</b> <code>{html.escape(deal['risk'])}</code>")
     if deal.get('ai_note'):
         lines.append(f" 🤖 <b>Gemini:</b> <i>{html.escape(deal['ai_note'])}</i>")
+    if deal.get('seen_note'):
+        lines.append(f" {html.escape(deal['seen_note'])}")
     lines.append(f" 🔗 <a href=\"{html.escape(deal['url'], quote=True)}\">Открыть объявление</a>")
     return "\n".join(lines) + "\n\n"
 
@@ -284,6 +353,11 @@ def main():
 
     deals.sort(key=lambda x: x['value_score'], reverse=True)
 
+    before = len(deals)
+    deals = dedupe_deals(deals)
+    if len(deals) < before:
+        log.info("Deduplicated re-posted listings: %d -> %d", before, len(deals))
+
     # Second-pass review of the top candidates with Gemini Pro: drops scam
     # listings and parsing garbage that the regex/score pipeline lets through.
     if ENABLE_AI_REVIEW and AI_REVIEW_TOP_N > 0:
@@ -306,6 +380,11 @@ def main():
 
     # 2. Balti deals - Top 5
     balti_deals = [d for d in deals if d['region'] == "Бельцы"][:5]
+
+    # Mark deals already shown in previous digests (and price moves since).
+    history = load_json_cache(DIGEST_HISTORY_FILE)
+    today = datetime.now().strftime("%Y-%m-%d")
+    annotate_with_history(moldova_deals + balti_deals, history, today)
 
     # Format beautiful message (Telegram HTML — robust to special chars in titles)
     header = "🔥 <b>ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD</b> 🔥\n"
@@ -330,6 +409,7 @@ def main():
     log.info("Sending %d message(s) to Telegram...", len(parts))
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
+    sent_any = False
     for part in parts:
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
@@ -341,10 +421,16 @@ def main():
             response = requests.post(url, json=payload, timeout=10)
             if response.status_code == 200:
                 log.info("Telegram notification sent successfully!")
+                sent_any = True
             else:
                 log.error("Failed to send message: %s", response.text)
         except Exception as e:
             log.error("Error sending Telegram message: %s", e)
+
+    if sent_any:
+        history = update_history(history, moldova_deals + balti_deals, today)
+        with open(DIGEST_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=1)
 
 
 if __name__ == "__main__":

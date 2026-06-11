@@ -22,6 +22,7 @@ laptops_database.db
 !passmark_gpu.json
 pricehistory_cache.json
 notebookcheck_cache.json
+digest_history.json
 
 # Reports
 *.txt

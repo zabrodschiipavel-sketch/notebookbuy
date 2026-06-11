@@ -23,6 +23,20 @@ _DEFAULT_GPU_TIER = {"price": 0, "score": 0}
 _components_cache: dict | None = None
 
 
+def plausible_nbc_score(value) -> int | None:
+    """Validate a Notebookcheck rating that came back from the AI web search.
+
+    Real Notebookcheck verdicts live in roughly 50–95%; the search regularly
+    hallucinates garbage like 12% or 15% (seen flipping to 80% for the same
+    laptop a run later). Outside 40–99 we prefer the component formula.
+    """
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    return v if 40 <= v <= 99 else None
+
+
 def external_cache_key(cpu: str, gpu: str, ram: int) -> str:
     """Key for the world-price/NBC JSON caches.
 

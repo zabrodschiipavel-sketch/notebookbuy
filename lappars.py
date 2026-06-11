@@ -384,7 +384,7 @@ def fetch_and_process(region: str = "balti"):
             log.warning("No ads found in response.")
             return
 
-        stats = {"new": 0, "price_drop": 0, "price_rise": 0, "unchanged": 0, "skip": 0}
+        stats = {"new": 0, "price_drop": 0, "price_rise": 0, "unchanged": 0}
 
         with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
@@ -421,9 +421,9 @@ def fetch_and_process(region: str = "balti"):
             conn.commit()
 
         log.info(
-            "📊 Summary: new=%d | drops=%d | rises=%d | unchanged=%d | skipped=%d",
+            "📊 Summary: new=%d | drops=%d | rises=%d | unchanged=%d",
             stats['new'], stats['price_drop'], stats['price_rise'],
-            stats['unchanged'], stats['skip'],
+            stats['unchanged'],
         )
 
         # Show top-5 biggest price drops (≥5%) across entire database

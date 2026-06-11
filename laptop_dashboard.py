@@ -16,6 +16,7 @@ from estimation import (
     estimate_fallback_price,
     estimate_fallback_score,
     external_cache_key,
+    plausible_nbc_score,
 )
 from scoring import (
     MAX_PRICE_MDL,
@@ -471,7 +472,8 @@ def get_external_info(row):
         diff = (row['price'] - world_mdl) / world_mdl * 100
         vs_pct = f"{diff:+.0f}%"
 
-    score = f"{nbc.get('score')}%" if nbc.get('score') else "—"
+    nbc_valid = plausible_nbc_score(nbc.get('score'))
+    score = f"{nbc_valid}%" if nbc_valid else "—"
     return pd.Series([vs_pct, score], index=["vs World", "NBC Score"])
 
 # Fallback estimation lives in estimation.py (shared with the analyzer and

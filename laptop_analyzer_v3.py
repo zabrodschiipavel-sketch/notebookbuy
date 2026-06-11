@@ -28,6 +28,7 @@ from estimation import (
     estimate_fallback_price,
     estimate_fallback_score,
     external_cache_key,
+    plausible_nbc_score,
 )
 from parser import LaptopParser
 from scoring import (
@@ -184,8 +185,9 @@ class LaptopAnalyzer:
                 )
                 prices[lap_id] = {"current_usd": estimated_price_mdl / MDL_USD_RATE, "fallback": True}
 
-            # Fallback for NBC Score
-            if lap_id not in ratings or not ratings[lap_id] or not ratings[lap_id].get('score'):
+            # Fallback for NBC Score (also when the AI search returned an
+            # implausible rating — e.g. the 12%/15% hallucinations).
+            if lap_id not in ratings or not plausible_nbc_score((ratings[lap_id] or {}).get('score')):
                 estimated_score = estimate_fallback_score(
                     cpu_val, gpu_val, ram_val
                 )

@@ -68,6 +68,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The digest deduplicates re-posted listings (same parsed CPU/RAM/SSD plus a
+  fuzzy-matching title) — sellers re-post the same laptop under new ad ids and
+  it used to occupy several top-5 slots.
+- Each digest deal is marked 🆕 or "🔁 В топе с <дата>" with the price delta
+  since it was first shown; history persists in `digest_history.json` (kept in
+  the Actions cache).
+- Notebookcheck ratings from the AI search are validated
+  (`estimation.plausible_nbc_score`): hallucinated values like 12%/15% (seen
+  flipping to 80% between runs) are replaced by the component-based formula in
+  the analyzer, digest, and dashboard.
+- CI also runs on Python 3.14; GitHub Actions bumped to current majors
+  (checkout v6, setup-python v6, cache v5, upload-artifact v7) — removes the
+  Node 20 deprecation warnings.
 - AI review of the Telegram digest: the top candidates are passed through
   Gemini Pro (`gemini-pro-latest`, falls back to `gemini-flash-latest` on
   free-tier keys) which excludes scam listings and parsing garbage and adds a
