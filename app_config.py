@@ -43,9 +43,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 # Stronger model used to sanity-check the final top before it is sent.
 # NOTE: pro models need a billing-enabled API key; on the free tier the review
-# automatically falls back to GEMINI_REVIEW_FALLBACK_MODEL.
+# automatically falls back through GEMINI_REVIEW_FALLBACK_MODELS (comma-
+# separated; multiple entries survive a temporary 503 on one model).
 GEMINI_PRO_MODEL = os.getenv("GEMINI_PRO_MODEL", "gemini-pro-latest")
-GEMINI_REVIEW_FALLBACK_MODEL = os.getenv("GEMINI_REVIEW_FALLBACK_MODEL", "gemini-flash-latest")
+GEMINI_REVIEW_FALLBACK_MODELS = [
+    m.strip()
+    for m in os.getenv(
+        "GEMINI_REVIEW_FALLBACK_MODEL", "gemini-flash-latest,gemini-2.5-flash"
+    ).split(",")
+    if m.strip()
+]
 
 # AI review of the Telegram digest top: catches scam listings and parsing
 # garbage (e.g. "Xiaomi with Apple M2", 128GB RAM from a 128GB SSD).

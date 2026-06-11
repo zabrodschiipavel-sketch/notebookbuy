@@ -16,7 +16,7 @@ from app_config import (
     GEMINI_MODEL,
     GEMINI_PRO_MODEL,
     GEMINI_REQUEST_DELAY_SEC,
-    GEMINI_REVIEW_FALLBACK_MODEL,
+    GEMINI_REVIEW_FALLBACK_MODELS,
     GEMINI_SEARCH_DELAY_SEC,
 )
 from retry_utils import call_with_retry
@@ -109,7 +109,7 @@ class AIService:
         """Sanity-check top digest deals with the stronger Gemini Pro model.
 
         Pro models are unavailable on free-tier API keys (quota 0), so when the
-        primary model fails the review retries on GEMINI_REVIEW_FALLBACK_MODEL.
+        primary model fails the review walks down GEMINI_REVIEW_FALLBACK_MODELS.
         Returns {ad_id: {"verdict": ..., "reason": ...}}; empty dict when the
         client is unavailable or all models fail, so callers degrade gracefully.
         """
@@ -117,8 +117,8 @@ class AIService:
             return {}
 
         models_to_try = [model or GEMINI_PRO_MODEL]
-        if not model and GEMINI_REVIEW_FALLBACK_MODEL not in models_to_try:
-            models_to_try.append(GEMINI_REVIEW_FALLBACK_MODEL)
+        if not model:
+            models_to_try += [m for m in GEMINI_REVIEW_FALLBACK_MODELS if m not in models_to_try]
 
         review_schema = types.Schema(
             type=types.Type.OBJECT,
@@ -157,7 +157,12 @@ class AIService:
             for d in deals
         ]
 
-        for model_name in models_to_try:
+        for i, model_name in enumerate(models_to_try):
+            # Models with a fallback behind them get a single attempt — a dead
+            # model (free-tier pro = quota 0) or a 503 spike should not stall
+            # the chain. Only the last model retries patiently: the digest
+            # runs once a day, so waiting out a demand spike is worth it.
+            is_last = i == len(models_to_try) - 1
             try:
                 resp = call_with_retry(
                     lambda m=model_name: self.client.models.generate_content(
@@ -170,8 +175,8 @@ class AIService:
                             temperature=0.1,
                         ),
                     ),
-                    max_retries=GEMINI_MAX_RETRIES,
-                    base_delay_sec=GEMINI_REQUEST_DELAY_SEC or 1.0,
+                    max_retries=GEMINI_MAX_RETRIES if is_last else 1,
+                    base_delay_sec=max(5.0, GEMINI_REQUEST_DELAY_SEC),
                     label=f"review_deals:{model_name}",
                 )
                 data = json.loads(resp.text)
