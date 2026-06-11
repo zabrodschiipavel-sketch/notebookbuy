@@ -32,6 +32,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The GraphQL scraper stored descriptions as a stringified translations dict
+  (`"{'ro': ..., 'ru': ...}"` with literal `\n`) — 97% of saved ads were
+  affected and the glued text hid specs from every regex. The scraper now
+  unwraps the `translated` text, and the parser treats literal `\n` as
+  whitespace so already-scraped rows heal on re-analysis.
+- Spec extraction bugs found by replaying the parser over 758 real ads
+  (RAM improved on 52 ads, CPU on 68, year on 72, SSD on 15):
+  - RAM no longer steals storage sizes ("128gb ssd" → 128 GB RAM) or GPU VRAM
+    ("RTX 3050Ti 4Gb" → 4 GB RAM); keyword-tied sizes ("RAM16GB", "8RAM",
+    "DDR5 32Gb", "озу: 16 гб") are now recognized, with guards for
+    "GDDR6 8GB", Romanian "memorie dedicată" (VRAM), digits glued to CPU
+    models ("i5-1035g1 ram"), and shop config lists ("ddr3 / 128gb ssd").
+  - An M-chip claim now needs Apple context in the title — a body comparison
+    ("как macbook") plus an "ssd m2" no longer turns a Xiaomi into an Apple
+    with an Apple benchmark score.
+  - Warranty years ("гарантия до 2025") are no longer taken as the release
+    year; a text year far ahead of the CPU generation falls back to the
+    CPU year.
+  - i5-1135G7-style suffixes are kept in full (was truncated to "i5", which
+    broke the Passmark benchmark lookup).
+- The Telegram digest is split into multiple messages when it exceeds
+  Telegram's 4096-char limit instead of failing with a 400.
 - Urgency wording ("срочно", "urgent", "без торга") no longer flags a listing
   as broken and triggers the heavy value penalty.
 - `daily_scrape.yml` no longer references a non-existent `requirements.txt`.
@@ -46,6 +68,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The digest deduplicates re-posted listings (same parsed CPU/RAM/SSD plus a
+  fuzzy-matching title) — sellers re-post the same laptop under new ad ids and
+  it used to occupy several top-5 slots.
+- Each digest deal is marked 🆕 or "🔁 В топе с <дата>" with the price delta
+  since it was first shown; history persists in `digest_history.json` (kept in
+  the Actions cache).
+- Notebookcheck ratings from the AI search are validated
+  (`estimation.plausible_nbc_score`): hallucinated values like 12%/15% (seen
+  flipping to 80% between runs) are replaced by the component-based formula in
+  the analyzer, digest, and dashboard.
+- CI also runs on Python 3.14; GitHub Actions bumped to current majors
+  (checkout v6, setup-python v6, cache v5, upload-artifact v7) — removes the
+  Node 20 deprecation warnings.
+- AI review of the Telegram digest: the top candidates are passed through
+  Gemini Pro (`gemini-pro-latest`, falls back to `gemini-flash-latest` on
+  free-tier keys) which excludes scam listings and parsing garbage and adds a
+  short verdict line per deal. Configured via `ENABLE_AI_REVIEW`,
+  `AI_REVIEW_TOP_N`, `GEMINI_PRO_MODEL`, `GEMINI_REVIEW_FALLBACK_MODEL`.
+  Motivated by 3 weeks of digest history where a fake 600-MDL "Maci Brook pro"
+  and a "Xiaomi with Apple M2" (regex caught `m.2` from the SSD spec) held
+  top-5 spots for days.
 - Tests for price tracking, GraphQL parsing, fallback estimation, benchmark
   lookup, and the SSD heuristic (suite: 36 → 63).
 - Test coverage for the Telegram digest (`process_deals`, `format_deal`):

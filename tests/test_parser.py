@@ -135,6 +135,85 @@ def test_apple_m3_max():
     assert res["ssd"] == 1024
 
 
+# --- Regressions caught on real 999.md ads (May 2026 database) ---
+
+def test_ram_not_stolen_by_ssd_size():
+    """'128gb ssd' listed before RAM must not become 128 GB of RAM."""
+    res = LaptopParser.regex_parse("128gb ssd, 8gb ram, i5-1135g7", "Ноутбук")
+    assert res["ram"] == 8
+    assert res["ssd"] == 128
+
+
+def test_ram_not_stolen_by_gpu_vram():
+    """Dell XPS pattern: GPU VRAM listed before RAM."""
+    res = LaptopParser.regex_parse("", "Dell XPS 15 (i7 12700H/RTX 3050Ti 4Gb/ 16Gb/ 1Tb)")
+    assert res["ram"] == 16
+
+
+def test_ram_glued_keyword_formats():
+    assert LaptopParser.regex_parse("i5-13500H RAM16GB MNVe512GB", "Asus")["ram"] == 16
+    assert LaptopParser.regex_parse("", "MacBook Air M1/512GB/8RAM")["ram"] == 8
+
+
+def test_ram_ddr_keyword():
+    res = LaptopParser.regex_parse("", "MSI! i5 12450H/RTX 4050 6Gb/DDR5 16Gb/SSD 512Gb")
+    assert res["ram"] == 16
+
+
+def test_ram_keyword_skips_cpu_model_digit():
+    """'i5-1035g1 ram 8gb': the '1' from the CPU model must not bind to 'ram'."""
+    res = LaptopParser.regex_parse("intel core i5-1035g1 ram 8gb ssd 256gb", "Acer")
+    assert res["ram"] == 8
+
+
+def test_ram_ignores_romanian_gpu_memory():
+    """'memorie dedicată' is GPU VRAM, not system RAM."""
+    res = LaptopParser.regex_parse(
+        "video gtx 1660 ti cu 6 gb memorie dedicată. ram: 16 gb ddr4", "MSI Leopard"
+    )
+    assert res["ram"] == 16
+
+
+def test_ram_ddr_config_list_not_matched_across_slash():
+    """Shop price lists like 'ddr3 / 128gb ssd' must not yield RAM=128."""
+    res = LaptopParser.regex_parse("8192mb (2x4gb) ddr3 / 128gb ssd = 2 490mdl", "HP Probook")
+    assert res["ram"] != 128
+
+
+def test_m_chip_requires_apple_title():
+    """A 'как macbook' comparison plus an 'ssd m2' must not make a Xiaomi an Apple."""
+    res = LaptopParser.regex_parse(
+        "ультрабук как macbook, ssd m2 256gb, intel core i5-8250u", "Xiaomi mi 13.3"
+    )
+    assert "m2" not in res["cpu"]
+
+
+def test_m_chip_kept_for_real_macbook():
+    res = LaptopParser.regex_parse("apple m2 8gb ram 256gb ssd", "MacBook Air 13 M2")
+    assert res["cpu"] == "m2"
+
+
+def test_warranty_year_not_release_year():
+    res = LaptopParser.regex_parse("i5-1135g7 8gb ram 256gb, гарантия до 2025 года", "Lenovo")
+    assert res["year_est"] == 2021  # from the CPU generation, not the warranty
+
+
+def test_literal_backslash_n_healed():
+    """Already-scraped ads store stringified dicts where literal \\n glues
+    letters to sizes ("hx\\n16gb ram") and hides specs from every regex."""
+    res = LaptopParser.regex_parse(
+        r"{'ru': 'core i9 13980hx\n16gb ram\nssd 1tb\nrtx 4070 8gb'}", "Asus ROG Strix"
+    )
+    assert res["ram"] == 16
+    assert res["ssd"] == 1024
+
+
+def test_cpu_g7_suffix_kept():
+    """i5-1135G7-style models must keep the full suffix for benchmark lookup."""
+    res = LaptopParser.regex_parse("i7-1165g7, 16gb ram, 512gb ssd", "Lenovo ThinkPad")
+    assert res["cpu"] == "i7-1165g7"
+
+
 def test_slitted_and_standalone_ssd():
     # 256gb slitted
     res1 = LaptopParser.regex_parse("8gb ram 256gb ssd", "Lenovo")

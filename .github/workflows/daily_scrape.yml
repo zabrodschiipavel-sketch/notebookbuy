@@ -14,10 +14,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -28,12 +28,13 @@ jobs:
 
       # Восстанавливаем БД и кэш-файлы из кэша GitHub Actions
       - name: Restore Scraper Cache & DB
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: |
             laptops_database.db
             pricehistory_cache.json
             notebookcheck_cache.json
+            digest_history.json
           key: scraper-db-cache-${{ github.run_id }}
           restore-keys: |
             scraper-db-cache-
@@ -52,29 +53,33 @@ jobs:
         run: |
           python laptop_analyzer_v3.py
 
-      # Сохраняем обновленную БД и кэш-файлы обратно в кэш
-      # (даже если последующие шаги упадут — собранные данные не теряются)
+      # Отправляем сводку лучших сделок в Telegram
+      # (GEMINI_API_KEY нужен для финального ревью топа через Gemini Pro;
+      # скрипт также пишет digest_history.json для пометок «уже в топе»)
+      - name: Send Telegram Notification
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python send_telegram.py
+
+      # Сохраняем обновленную БД и кэш-файлы обратно в кэш — после отправки,
+      # чтобы попала и история дайджестов (если шаг упал — данные не теряются)
       - name: Save Scraper Cache & DB
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: |
             laptops_database.db
             pricehistory_cache.json
             notebookcheck_cache.json
+            digest_history.json
           key: scraper-db-cache-${{ github.run_id }}
-
-      # Отправляем сводку лучших сделок в Telegram
-      - name: Send Telegram Notification
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python send_telegram.py
 
       # Загружаем сгенерированные текстовые и CSV отчеты как артефакты сборки
       - name: Upload Analysis Reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: laptop-reports
           path: |

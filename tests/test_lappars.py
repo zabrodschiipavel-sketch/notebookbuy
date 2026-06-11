@@ -74,6 +74,22 @@ def test_parse_graphql_ad_basic():
     assert parsed["price"] > 1500
 
 
+def test_parse_graphql_ad_unwraps_translations_dict():
+    """A dict-valued description must yield the translated text, not a
+    Python-repr blob ("{'ro': ..., 'ru': ...}") with literal \\n sequences —
+    97% of stored ads were affected."""
+    ad = {
+        "id": "43",
+        "title": "Asus ROG",
+        "description": {"value": {
+            "ro": "text ro", "ru": "текст ру", "translated": "core i9\n16gb ram",
+        }},
+    }
+    parsed = lappars.parse_graphql_ad(ad)
+    assert parsed["body"] == "core i9\n16gb ram"
+    assert "{'ro'" not in parsed["body"]
+
+
 def test_parse_graphql_ad_usd_and_plain():
     usd = lappars.parse_graphql_ad({"id": "1", "price": {"value": "$1000"}})
     plain = lappars.parse_graphql_ad({"id": "2", "price": {"value": "9999 lei"}})

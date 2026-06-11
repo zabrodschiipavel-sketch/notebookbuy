@@ -14,7 +14,9 @@ from app_config import (
     GEMINI_MAX_RETRIES,
     GEMINI_MAX_WORKERS,
     GEMINI_MODEL,
+    GEMINI_PRO_MODEL,
     GEMINI_REQUEST_DELAY_SEC,
+    GEMINI_REVIEW_FALLBACK_MODELS,
     GEMINI_SEARCH_DELAY_SEC,
 )
 from retry_utils import call_with_retry
@@ -87,6 +89,107 @@ class AIService:
                 if res:
                     results.append(res)
         return results
+
+    _REVIEW_SYSTEM_PROMPT = (
+        "You review used-laptop listings from the Moldovan marketplace 999.md "
+        "before they reach a buyer's Telegram digest. For each listing judge: "
+        "(1) do the parsed specs contradict the model in the title (e.g. a "
+        "Xiaomi or 2013-era laptop 'with' an Apple M2 or i7-14700HX, 128GB RAM "
+        "on a budget machine — usually parsing errors); (2) does the deal look "
+        "legitimate (a near-new MacBook at a fraction of market price is a "
+        "scam or an iCloud/MDM-locked unit); (3) is it a real sale ad at all "
+        "(not an accessories ad, a description fragment, or shop spam). "
+        "Verdicts: 'exclude' = certain garbage/scam, must not be shown; "
+        "'suspicious' = show but warn the buyer what to verify; 'ok' = "
+        "plausible; 'great' = specs consistent and genuinely good value. "
+        "reason: at most 12 words, in Russian."
+    )
+
+    def review_deals(self, deals: list[dict], model: str | None = None) -> dict[str, dict]:
+        """Sanity-check top digest deals with the stronger Gemini Pro model.
+
+        Pro models are unavailable on free-tier API keys (quota 0), so when the
+        primary model fails the review walks down GEMINI_REVIEW_FALLBACK_MODELS.
+        Returns {ad_id: {"verdict": ..., "reason": ...}}; empty dict when the
+        client is unavailable or all models fail, so callers degrade gracefully.
+        """
+        if not self.client or not deals:
+            return {}
+
+        models_to_try = [model or GEMINI_PRO_MODEL]
+        if not model:
+            models_to_try += [m for m in GEMINI_REVIEW_FALLBACK_MODELS if m not in models_to_try]
+
+        review_schema = types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "reviews": types.Schema(
+                    type=types.Type.ARRAY,
+                    items=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "id": types.Schema(type=types.Type.STRING),
+                            "verdict": types.Schema(
+                                type=types.Type.STRING,
+                                enum=["exclude", "suspicious", "ok", "great"],
+                            ),
+                            "reason": types.Schema(type=types.Type.STRING),
+                        },
+                        required=["id", "verdict", "reason"],
+                    ),
+                )
+            },
+            required=["reviews"],
+        )
+
+        payload = [
+            {
+                "id": str(d["id"]),
+                "title": d.get("title", ""),
+                "price_mdl": d.get("price", 0),
+                "parsed_cpu": d.get("cpu", ""),
+                "parsed_ram_gb": d.get("ram", 0),
+                "parsed_ssd_gb": d.get("ssd", 0),
+                "vs_world": d.get("vs_str", ""),
+                "heuristic_risk": d.get("risk", ""),
+                "description": str(d.get("description", ""))[:600],
+            }
+            for d in deals
+        ]
+
+        for i, model_name in enumerate(models_to_try):
+            # Models with a fallback behind them get a single attempt — a dead
+            # model (free-tier pro = quota 0) or a 503 spike should not stall
+            # the chain. Only the last model retries patiently: the digest
+            # runs once a day, so waiting out a demand spike is worth it.
+            is_last = i == len(models_to_try) - 1
+            try:
+                resp = call_with_retry(
+                    lambda m=model_name: self.client.models.generate_content(
+                        model=m,
+                        contents="Review these listings:\n" + json.dumps(payload, ensure_ascii=False, indent=1),
+                        config=types.GenerateContentConfig(
+                            system_instruction=self._REVIEW_SYSTEM_PROMPT,
+                            response_mime_type="application/json",
+                            response_schema=review_schema,
+                            temperature=0.1,
+                        ),
+                    ),
+                    max_retries=GEMINI_MAX_RETRIES if is_last else 1,
+                    base_delay_sec=max(5.0, GEMINI_REQUEST_DELAY_SEC),
+                    label=f"review_deals:{model_name}",
+                )
+                data = json.loads(resp.text)
+                log.info("Deal review done with %s", model_name)
+                return {
+                    str(r["id"]): {"verdict": r["verdict"], "reason": r["reason"]}
+                    for r in data.get("reviews", [])
+                    if r.get("id")
+                }
+            except Exception as e:
+                log.warning(f"AI deal review with {model_name} failed: {e}")
+        log.warning("All review models failed; sending digest without AI review")
+        return {}
 
     def google_search_json(self, prompt: str) -> dict[str, Any]:
         if not self.client:
