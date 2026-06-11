@@ -32,6 +32,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The GraphQL scraper stored descriptions as a stringified translations dict
+  (`"{'ro': ..., 'ru': ...}"` with literal `\n`) — 97% of saved ads were
+  affected and the glued text hid specs from every regex. The scraper now
+  unwraps the `translated` text, and the parser treats literal `\n` as
+  whitespace so already-scraped rows heal on re-analysis.
+- Spec extraction bugs found by replaying the parser over 758 real ads
+  (RAM improved on 52 ads, CPU on 68, year on 72, SSD on 15):
+  - RAM no longer steals storage sizes ("128gb ssd" → 128 GB RAM) or GPU VRAM
+    ("RTX 3050Ti 4Gb" → 4 GB RAM); keyword-tied sizes ("RAM16GB", "8RAM",
+    "DDR5 32Gb", "озу: 16 гб") are now recognized, with guards for
+    "GDDR6 8GB", Romanian "memorie dedicată" (VRAM), digits glued to CPU
+    models ("i5-1035g1 ram"), and shop config lists ("ddr3 / 128gb ssd").
+  - An M-chip claim now needs Apple context in the title — a body comparison
+    ("как macbook") plus an "ssd m2" no longer turns a Xiaomi into an Apple
+    with an Apple benchmark score.
+  - Warranty years ("гарантия до 2025") are no longer taken as the release
+    year; a text year far ahead of the CPU generation falls back to the
+    CPU year.
+  - i5-1135G7-style suffixes are kept in full (was truncated to "i5", which
+    broke the Passmark benchmark lookup).
+- The Telegram digest is split into multiple messages when it exceeds
+  Telegram's 4096-char limit instead of failing with a 400.
 - Urgency wording ("срочно", "urgent", "без торга") no longer flags a listing
   as broken and triggers the heavy value penalty.
 - `daily_scrape.yml` no longer references a non-existent `requirements.txt`.

@@ -169,10 +169,19 @@ def save_or_update_ad(cursor, ad_data: dict) -> str:
 
 
 def _description_from_ad(ad: dict) -> str:
-    """Extract listing description from GraphQL feature id 13."""
+    """Extract listing description from GraphQL feature id 13.
+
+    The feature value is usually a translations dict
+    ({'ro': ..., 'ru': ..., 'translated': ...}); stringifying it whole used to
+    store a Python-repr blob with literal "\\n" sequences that crippled the
+    downstream regex parser.
+    """
     desc_feature = ad.get("description")
     if isinstance(desc_feature, dict) and desc_feature.get("value"):
-        return str(desc_feature["value"])
+        val = desc_feature["value"]
+        if isinstance(val, dict):
+            val = val.get("translated") or val.get("ru") or val.get("ro") or ""
+        return str(val)
     return ""
 
 

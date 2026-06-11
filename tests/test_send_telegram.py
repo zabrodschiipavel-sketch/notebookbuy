@@ -1,6 +1,13 @@
 """Tests for the Telegram digest: deal selection, cache lookup, formatting."""
 from estimation import external_cache_key
-from send_telegram import apply_ai_review, format_deal, process_deals
+from send_telegram import (
+    TELEGRAM_MSG_LIMIT,
+    apply_ai_review,
+    clip_to_limit,
+    format_deal,
+    process_deals,
+    split_message,
+)
 
 
 COMPONENTS = {
@@ -148,6 +155,27 @@ def test_process_deals_includes_id_and_description():
     deals = process_deals([make_row()], {}, {}, COMPONENTS)
     assert deals[0]["id"] == 1
     assert deals[0]["description"] == "[Region: Bălți]"
+
+
+def test_split_message_single_when_fits():
+    parts = split_message("header\n", ["sect1\n", "sect2\n"])
+    assert parts == ["header\nsect1\nsect2\n"]
+
+
+def test_split_message_splits_by_section_when_too_long():
+    big1 = "deal one\n\n" * 300   # ~3000 chars
+    big2 = "deal two\n\n" * 300
+    parts = split_message("header\n", [big1, big2])
+    assert len(parts) == 2
+    assert parts[0].startswith("header\n")
+    assert all(len(p) <= TELEGRAM_MSG_LIMIT for p in parts)
+
+
+def test_clip_to_limit_cuts_at_deal_boundary():
+    text = ("x" * 100 + "\n\n") * 50  # > 4096
+    clipped = clip_to_limit(text)
+    assert len(clipped) <= TELEGRAM_MSG_LIMIT
+    assert clipped.endswith("x")  # cut exactly at a \n\n boundary
 
 
 def test_format_deal_region_only_in_moldova_section():

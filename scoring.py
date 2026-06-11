@@ -8,7 +8,7 @@ import datetime
 import re
 
 
-ANALYSIS_VERSION = "2026-05-18.4" # Incrementing version due to expanded CPU_TIERS and default fallback
+ANALYSIS_VERSION = "2026-06-11.1" # Parser fixes: RAM vs SSD sizes, M-chip title guard, warranty years, G7 CPU suffixes
 
 
 MIN_PRICE_MDL = 500

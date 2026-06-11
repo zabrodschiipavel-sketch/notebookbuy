@@ -28,6 +28,10 @@ log = logging.getLogger(__name__)
 # Minimum value_score for a laptop to be included in the Telegram digest.
 MIN_VALUE_SCORE = 100
 
+# Telegram rejects messages longer than 4096 chars with a 400 — the digest
+# must be split/clipped, not dropped.
+TELEGRAM_MSG_LIMIT = 4096
+
 # Retrieve tokens from environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -204,6 +208,23 @@ def apply_ai_review(deals: list[dict], reviews: dict[str, dict]) -> list[dict]:
     return kept
 
 
+def clip_to_limit(text: str, limit: int = TELEGRAM_MSG_LIMIT) -> str:
+    """Trim an over-long message at a deal boundary so HTML tags stay intact."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind("\n\n", 0, limit)
+    return text[:cut] if cut > 0 else text[:limit]
+
+
+def split_message(header: str, sections: list[str], limit: int = TELEGRAM_MSG_LIMIT) -> list[str]:
+    """One message when everything fits, otherwise one message per section."""
+    combined = header + "".join(sections)
+    if len(combined) <= limit:
+        return [combined]
+    parts = [header + sections[0]] + sections[1:]
+    return [clip_to_limit(p, limit) for p in parts]
+
+
 def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
     """Render one deal as Telegram HTML. User-supplied text is escaped so
     listing titles with *, _, [, < etc. cannot break the markup."""
@@ -287,41 +308,43 @@ def main():
     balti_deals = [d for d in deals if d['region'] == "Бельцы"][:5]
 
     # Format beautiful message (Telegram HTML — robust to special chars in titles)
-    message = "🔥 <b>ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD</b> 🔥\n"
-    message += f"📅 <i>Дата отчета: {datetime.now().strftime('%d.%m.%Y %H:%M')}</i>\n\n"
+    header = "🔥 <b>ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD</b> 🔥\n"
+    header += f"📅 <i>Дата отчета: {datetime.now().strftime('%d.%m.%Y %H:%M')}</i>\n\n"
 
     # Moldova Section
-    message += "🌍 <b>ВСЯ МОЛДОВА (ТОП-5)</b>\n"
-    message += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    sect_moldova = "🌍 <b>ВСЯ МОЛДОВА (ТОП-5)</b>\n"
+    sect_moldova += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     for idx, d in enumerate(moldova_deals, start=1):
-        message += format_deal(idx, d, show_region=True)
+        sect_moldova += format_deal(idx, d, show_region=True)
 
     # Balti Section
-    message += "\n🔔 <b>БЕЛЬЦЫ (ТОП-5)</b>\n"
-    message += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    sect_balti = "\n🔔 <b>БЕЛЬЦЫ (ТОП-5)</b>\n"
+    sect_balti += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
     if balti_deals:
         for idx, d in enumerate(balti_deals, start=1):
-            message += format_deal(idx, d, show_region=False)
+            sect_balti += format_deal(idx, d, show_region=False)
     else:
-        message += "   <i>Выгодных предложений в Бельцах пока не найдено.</i>\n\n"
+        sect_balti += "   <i>Выгодных предложений в Бельцах пока не найдено.</i>\n\n"
 
-    log.info("Sending message to Telegram...")
+    parts = split_message(header, [sect_moldova, sect_balti])
+    log.info("Sending %d message(s) to Telegram...", len(parts))
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
 
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            log.info("Telegram notification sent successfully!")
-        else:
-            log.error("Failed to send message: %s", response.text)
-    except Exception as e:
-        log.error("Error sending Telegram message: %s", e)
+    for part in parts:
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": part,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                log.info("Telegram notification sent successfully!")
+            else:
+                log.error("Failed to send message: %s", response.text)
+        except Exception as e:
+            log.error("Error sending Telegram message: %s", e)
 
 
 if __name__ == "__main__":
