@@ -21,6 +21,7 @@ from app_config import (
     GEMINI_REVIEW_FALLBACK_MODELS,
     GEMINI_REVIEW_MODEL,
     GEMINI_RPM_LIMIT,
+    GEMINI_RPM_LIMIT_FULL,
     GEMINI_SEARCH_DELAY_SEC,
 )
 from retry_utils import RateLimiter, call_with_retry
@@ -64,12 +65,17 @@ class AIService:
             "gpu: model or 'integrated'. ram/ssd: GB as integers. is_broken: true if parts/broken."
         )
 
+    @staticmethod
+    def rpm_for(model: str) -> int:
+        """Free-tier RPM differs by tier: flash-lite 15, full flash 5."""
+        return GEMINI_RPM_LIMIT if "lite" in model.lower() else GEMINI_RPM_LIMIT_FULL
+
     def limiter_for(self, model: str) -> RateLimiter:
         """Return the shared per-model RPM limiter, creating it on first use."""
         with self._limiters_lock:
             limiter = self._limiters.get(model)
             if limiter is None:
-                limiter = RateLimiter(GEMINI_RPM_LIMIT, window_sec=60.0)
+                limiter = RateLimiter(self.rpm_for(model), window_sec=60.0)
                 self._limiters[model] = limiter
             return limiter
 

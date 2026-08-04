@@ -26,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PRICE_DROP_MIN_PCT`/`PRICE_DROP_MAX_PCT`, because the raw list is mostly a
   seller correcting a 111111 MDL typo into a "-99% drop".
 
+### Fixed
+
+- Throttling used one RPM figure for every model. The free tier is not uniform:
+  flash-lite allows 15 requests per minute, full flash only 5, so the review
+  was being throttled at more than twice its actual limit and would have 429ed
+  on its first call. The limit is now resolved per tier
+  (`GEMINI_RPM_LIMIT` / `GEMINI_RPM_LIMIT_FULL`).
+- Extraction is pinned to `gemini-3.5-flash-lite` rather than the
+  `gemini-flash-lite-latest` alias. Requests-per-day, not per-minute, is what
+  binds a path making ~63 calls a morning — and free-tier RPD ranges from 20
+  (2.5 Flash Lite) to 500 (3.1 and 3.5 Flash Lite) inside that one family. An
+  alias offers no way to know which tier it bills against, so landing on a
+  20/day model would starve extraction on the first run. Review keeps its
+  alias: one call a day against a 20/day budget has room to spare.
+
 ### Changed
 
 - The digest review now checks whether a configuration was ever sold, not just
