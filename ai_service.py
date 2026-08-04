@@ -17,9 +17,9 @@ from app_config import (
     GEMINI_MAX_RETRIES,
     GEMINI_MAX_WORKERS,
     GEMINI_MODEL,
-    GEMINI_PRO_MODEL,
     GEMINI_REQUEST_DELAY_SEC,
     GEMINI_REVIEW_FALLBACK_MODELS,
+    GEMINI_REVIEW_MODEL,
     GEMINI_RPM_LIMIT,
     GEMINI_SEARCH_DELAY_SEC,
 )
@@ -148,17 +148,20 @@ class AIService:
     )
 
     def review_deals(self, deals: list[dict], model: str | None = None) -> dict[str, dict]:
-        """Sanity-check top digest deals with the stronger Gemini Pro model.
+        """Sanity-check the top digest deals before they are sent.
 
-        Pro models are unavailable on free-tier API keys (quota 0), so when the
-        primary model fails the review walks down GEMINI_REVIEW_FALLBACK_MODELS.
-        Returns {ad_id: {"verdict": ..., "reason": ...}}; empty dict when the
-        client is unavailable or all models fail, so callers degrade gracefully.
+        Uses full flash rather than the flash-lite model that does extraction:
+        on real listings from past digests it caught 3 of 4 planted scams
+        against flash-lite's 2, and this runs once a day on ~15 listings.
+        When the primary fails the review walks down
+        GEMINI_REVIEW_FALLBACK_MODELS. Returns {ad_id: {"verdict", "reason"}};
+        an empty dict when the client is unavailable or every model fails, so
+        callers degrade into sending the digest unreviewed.
         """
         if not self.client or not deals:
             return {}
 
-        models_to_try = [model or GEMINI_PRO_MODEL]
+        models_to_try = [model or GEMINI_REVIEW_MODEL]
         if not model:
             models_to_try += [m for m in GEMINI_REVIEW_FALLBACK_MODELS if m not in models_to_try]
 

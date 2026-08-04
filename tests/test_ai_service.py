@@ -6,8 +6,8 @@ import retry_utils
 from ai_service import AIService
 from app_config import (
     GEMINI_MAX_RETRIES,
-    GEMINI_PRO_MODEL,
     GEMINI_REVIEW_FALLBACK_MODELS,
+    GEMINI_REVIEW_MODEL,
 )
 
 
@@ -35,7 +35,7 @@ def test_review_falls_back_when_pro_unavailable():
         @staticmethod
         def generate_content(model, contents, config):
             calls.append(model)
-            if model == GEMINI_PRO_MODEL:
+            if model == GEMINI_REVIEW_MODEL:
                 raise RuntimeError("429 RESOURCE_EXHAUSTED (free tier)")
             return _Resp(json.dumps({
                 "reviews": [{"id": "1", "verdict": "exclude", "reason": "скам"}]
@@ -46,7 +46,7 @@ def test_review_falls_back_when_pro_unavailable():
 
     assert out == {"1": {"verdict": "exclude", "reason": "скам"}}
     # Non-final models get a single fast attempt before the chain moves on.
-    assert calls.count(GEMINI_PRO_MODEL) == 1
+    assert calls.count(GEMINI_REVIEW_MODEL) == 1
     assert calls[-1] == GEMINI_REVIEW_FALLBACK_MODELS[0]
 
 
@@ -64,7 +64,7 @@ def test_review_returns_empty_when_all_models_fail(monkeypatch):
     assert svc.review_deals([{"id": 1, "title": "x", "price": 1}]) == {}
     # Last model in the chain retries patiently; the others bail after one try.
     assert calls.count(GEMINI_REVIEW_FALLBACK_MODELS[-1]) == GEMINI_MAX_RETRIES
-    assert calls.count(GEMINI_PRO_MODEL) == 1
+    assert calls.count(GEMINI_REVIEW_MODEL) == 1
 
 
 def test_limiter_is_shared_per_model_not_per_call():
