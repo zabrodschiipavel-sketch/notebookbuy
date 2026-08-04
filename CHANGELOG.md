@@ -7,8 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gemini calls were being rate-limited into uselessness on every run.** The
+  free tier grants 15 requests per minute *per model*; the worker pool spent
+  that budget in about five seconds and every later call returned 429, while
+  the retry back-off waited 1–4 s against the ~16 s the API asked for. Across
+  the daily runs sampled between 2026-06-12 and 2026-08-04 only ~18 of ~160
+  calls succeeded, so 25–30 ads a day were dropped from the ranking and the
+  world-price and Notebookcheck lookups never returned anything. Calls now go
+  through a shared per-model `RateLimiter` (`GEMINI_RPM_LIMIT`, default 12) and
+  the back-off honours the server's own `retryDelay`.
+- `get_price_drops` anchored "first" and "last" price on `recorded_at`. Two
+  snapshots written inside the same clock tick share a timestamp, so
+  `MIN(recorded_at)` and `MAX(recorded_at)` matched the same rows and the drop
+  collapsed to 0%. Ordering is now anchored on the autoincrement id. The
+  existing test only caught this on a coarse clock (it passed on CI, failed on
+  Windows); a timestamp-independent regression test was added.
+- Failed world-price / Notebookcheck lookups were never written to the cache,
+  so `pricehistory_cache.json` and `notebookcheck_cache.json` were never
+  created — the Actions cache and the report artifact had nothing to store, and
+  every run re-asked the same unanswered questions. Misses are now remembered
+  for `EXTERNAL_MISS_TTL_DAYS` (default 7).
+
 ### Changed
 
+- AI extraction logs an explicit `parsed / failed` tally and raises a GitHub
+  Actions warning annotation when it drops more than 20% of a batch — the daily
+  workflow reported success for two months while most of its AI work failed.
+- `plotly` moved from `<6` (stuck on the end-of-life 5.24.1) to `>=6,<7`, and
+  the deprecated `use_container_width=` was replaced with `width="stretch"`,
+  which requires `streamlit>=1.50`.
+- Added `.github/dependabot.yml` (pip + github-actions, monthly) and a weekly
+  schedule plus `workflow_dispatch` on CI: dependencies are unpinned and the
+  daily job installs them fresh every morning, so drift needs to be caught
+  without waiting for the next commit.
+- Repository URLs across README, `pyproject.toml`, `CONTRIBUTING.md`,
+  `SECURITY.md`, the issue-template config and the publish script pointed at
+  `pravel-no/notebookbuy`, which stopped receiving pushes on 2026-06-10; the
+  README CI badge was therefore reporting a different repository's status.
 - Unified the component-based fallback price/score logic into a single
   `estimation.py` shared by the analyzer and the Telegram notifier, which had
   silently diverged.
@@ -114,4 +151,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GraphQL: use `description: feature(id: 13)` after 999.md removed the `body` field
 - SSD parser: treat explicit `gb` units correctly (e.g. `1 gb ssd` → 1 GB, not 1 TB)
 
-[1.0.0]: https://github.com/pravel-no/notebookbuy/releases/tag/v1.0.0
+[1.0.0]: https://github.com/zabrodschiipavel-sketch/notebookbuy/releases/tag/v1.0.0

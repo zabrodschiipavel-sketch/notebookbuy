@@ -1,8 +1,9 @@
 """Gemini AI service for laptop spec extraction and grounded web search."""
 import json
 import logging
+import os
 import re
-import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -11,24 +12,41 @@ from google.genai import types
 
 from app_config import (
     GEMINI_API_KEY,
+    GEMINI_MAX_BACKOFF_SEC,
     GEMINI_MAX_RETRIES,
     GEMINI_MAX_WORKERS,
     GEMINI_MODEL,
     GEMINI_PRO_MODEL,
     GEMINI_REQUEST_DELAY_SEC,
     GEMINI_REVIEW_FALLBACK_MODELS,
+    GEMINI_RPM_LIMIT,
     GEMINI_SEARCH_DELAY_SEC,
 )
-from retry_utils import call_with_retry
+from retry_utils import RateLimiter, call_with_retry
 
 
 log = logging.getLogger(__name__)
+
+
+def _annotate_ci(message: str) -> None:
+    """Raise a GitHub Actions annotation so silent degradation is visible.
+
+    The daily workflow exits 0 even when most AI calls fail, so a warning buried
+    in a thousand log lines is not enough — an annotation surfaces on the run.
+    """
+    if os.getenv("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=AI extraction degraded::{message}", flush=True)
+
 
 class AIService:
     """Wraps Google Gemini for structured spec extraction and Google Search tool."""
 
     def __init__(self):
         self.client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+        # Gemini's RPM quota is per model, so each model gets its own budget;
+        # the extraction pass must not starve the digest review that follows it.
+        self._limiters: dict[str, RateLimiter] = {}
+        self._limiters_lock = threading.Lock()
         self.schema = types.Schema(
             type=types.Type.OBJECT,
             properties={
@@ -44,6 +62,15 @@ class AIService:
             "Extract laptop specs accurately. cpu: full model (e.g. 'Intel Core i7-12700H'). "
             "gpu: model or 'integrated'. ram/ssd: GB as integers. is_broken: true if parts/broken."
         )
+
+    def limiter_for(self, model: str) -> RateLimiter:
+        """Return the shared per-model RPM limiter, creating it on first use."""
+        with self._limiters_lock:
+            limiter = self._limiters.get(model)
+            if limiter is None:
+                limiter = RateLimiter(GEMINI_RPM_LIMIT, window_sec=60.0)
+                self._limiters[model] = limiter
+            return limiter
 
     def extract_specs(self, ads_list: list[dict]) -> list[dict]:
         if not self.client:
@@ -71,9 +98,9 @@ class AIService:
                     max_retries=GEMINI_MAX_RETRIES,
                     base_delay_sec=GEMINI_REQUEST_DELAY_SEC or 1.0,
                     label=f"extract_specs:{ad['id']}",
+                    max_delay_sec=GEMINI_MAX_BACKOFF_SEC,
+                    limiter=self.limiter_for(GEMINI_MODEL),
                 )
-                if GEMINI_REQUEST_DELAY_SEC > 0:
-                    time.sleep(GEMINI_REQUEST_DELAY_SEC)
                 data = json.loads(response.text)
                 data["id"] = ad["id"]
                 return data
@@ -88,6 +115,20 @@ class AIService:
                 res = future.result()
                 if res:
                     results.append(res)
+
+        failed = len(ads_list) - len(results)
+        # A run that silently drops most ads still exits 0, so the failure count
+        # has to be loud enough to notice in the daily workflow log.
+        log.log(
+            logging.WARNING if failed else logging.INFO,
+            "AI extraction: %s/%s ads parsed, %s failed",
+            len(results), len(ads_list), failed,
+        )
+        if ads_list and failed / len(ads_list) > 0.2:
+            _annotate_ci(
+                f"AI extraction dropped {failed} of {len(ads_list)} ads "
+                f"(likely Gemini rate limiting) — those ads are missing from today's ranking."
+            )
         return results
 
     _REVIEW_SYSTEM_PROMPT = (
@@ -178,6 +219,8 @@ class AIService:
                     max_retries=GEMINI_MAX_RETRIES if is_last else 1,
                     base_delay_sec=max(5.0, GEMINI_REQUEST_DELAY_SEC),
                     label=f"review_deals:{model_name}",
+                    max_delay_sec=GEMINI_MAX_BACKOFF_SEC,
+                    limiter=self.limiter_for(model_name),
                 )
                 data = json.loads(resp.text)
                 log.info("Deal review done with %s", model_name)
@@ -208,6 +251,8 @@ class AIService:
                 max_retries=GEMINI_MAX_RETRIES,
                 base_delay_sec=GEMINI_SEARCH_DELAY_SEC or 1.0,
                 label="google_search_json",
+                max_delay_sec=GEMINI_MAX_BACKOFF_SEC,
+                limiter=self.limiter_for(GEMINI_MODEL),
             )
             text = resp.text
             decoder = json.JSONDecoder()

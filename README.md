@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![CI](https://github.com/pravel-no/notebookbuy/actions/workflows/ci.yml/badge.svg)](https://github.com/pravel-no/notebookbuy/actions/workflows/ci.yml)
+[![CI](https://github.com/zabrodschiipavel-sketch/notebookbuy/actions/workflows/ci.yml/badge.svg)](https://github.com/zabrodschiipavel-sketch/notebookbuy/actions/workflows/ci.yml)
 
 **Find the best laptop deals on [999.md](https://999.md)** — scrape listings via GraphQL, score hardware with Passmark benchmarks, and explore results in a premium Streamlit dashboard.
 
@@ -77,7 +77,7 @@ notebookbuy/
 ### 1. Install
 
 ```bash
-git clone https://github.com/pravel-no/notebookbuy.git
+git clone https://github.com/zabrodschiipavel-sketch/notebookbuy.git
 cd notebookbuy
 python -m venv .venv
 ```

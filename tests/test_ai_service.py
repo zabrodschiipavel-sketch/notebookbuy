@@ -65,6 +65,40 @@ def test_review_returns_empty_when_all_models_fail(monkeypatch):
     assert calls.count(GEMINI_PRO_MODEL) == 1
 
 
+def test_limiter_is_shared_per_model_not_per_call():
+    """One budget per model: Gemini's RPM quota is per-model, and every caller
+    of that model has to draw from the same bucket or throttling is pointless."""
+    svc = AIService()
+    assert svc.limiter_for("model-a") is svc.limiter_for("model-a")
+    assert svc.limiter_for("model-a") is not svc.limiter_for("model-b")
+
+
+def test_extract_specs_reports_failures(monkeypatch, caplog):
+    monkeypatch.setattr("retry_utils.time.sleep", lambda s: None)
+    # Otherwise this deliberate failure posts a real annotation on the CI run.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+
+    class Models:
+        @staticmethod
+        def generate_content(model, contents, config):
+            if "good" in contents[0]:
+                return _Resp(json.dumps(
+                    {"cpu": "i5", "gpu": "integrated", "ram": 8, "ssd": 256, "is_broken": False}
+                ))
+            raise RuntimeError("429 RESOURCE_EXHAUSTED")
+
+    svc = _service_with_models(Models())
+    ads = [
+        {"id": "1", "title": "good one", "text": "t"},
+        {"id": "2", "title": "bad one", "text": "t"},
+    ]
+    with caplog.at_level("INFO"):
+        out = svc.extract_specs(ads)
+
+    assert [r["id"] for r in out] == ["1"]
+    assert "1/2 ads parsed, 1 failed" in caplog.text
+
+
 def test_review_explicit_model_skips_fallback(monkeypatch):
     monkeypatch.setattr("retry_utils.time.sleep", lambda s: None)
     calls = []

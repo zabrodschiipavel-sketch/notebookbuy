@@ -120,3 +120,27 @@ def test_get_price_drops_reports_drop(db):
     assert by_id[1]["drop_pct"] == 20.0
     # Single-record ad must not appear (needs > 1 history row).
     assert 2 not in by_id
+
+
+def test_get_price_drops_with_identical_timestamps(db):
+    """Snapshots sharing a recorded_at must still yield first/last correctly.
+
+    On a coarse system clock two consecutive writes land on the same timestamp;
+    ordering by recorded_at then matched both rows as first *and* last and the
+    drop collapsed to 0%. Ordering is anchored on the autoincrement id instead.
+    """
+    stamp = "2026-01-01 10:00:00.000000"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO ads (id, title, price, url) VALUES (1, 'Dropper', 8000, 'u')"
+        )
+        conn.executemany(
+            "INSERT INTO price_history (ad_id, price, recorded_at) VALUES (?, ?, ?)",
+            [(1, 10000, stamp), (1, 8000, stamp)],
+        )
+        conn.commit()
+
+    by_id = {d["ad_id"]: d for d in lappars.get_price_drops(min_drop_pct=5.0, db=db)}
+    assert by_id[1]["first_price"] == 10000
+    assert by_id[1]["last_price"] == 8000
+    assert by_id[1]["drop_pct"] == 20.0

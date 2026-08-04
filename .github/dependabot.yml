@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # Действия в workflow устаревают тихо: пайплайн продолжает зеленеть,
+  # пока GitHub не отключит устаревшую версию runner'а.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+    groups:
+      # Патч-обновления не заслуживают отдельного PR каждое.
+      patch-updates:
+        update-types:
+          - "patch"

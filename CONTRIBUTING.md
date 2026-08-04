@@ -6,7 +6,7 @@ Thank you for your interest in contributing! Here's how to get started.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/pravel-no/notebookbuy.git
+git clone https://github.com/zabrodschiipavel-sketch/notebookbuy.git
 cd notebookbuy
 
 # 2. Create a virtual environment
