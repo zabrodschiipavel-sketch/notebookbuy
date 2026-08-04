@@ -9,6 +9,7 @@ from send_telegram import (
     clip_to_limit,
     dedupe_deals,
     format_deal,
+    format_price_drops,
     prioritize_by_novelty,
     process_deals,
     select_price_drops,
@@ -119,6 +120,18 @@ def test_novelty_holds_back_unchanged_repeat():
     assert [d["id"] for d in out] == [8], "the stale repeat should be dropped despite a higher score"
 
 
+def test_novelty_does_not_promote_a_repeat_that_got_more_expensive():
+    """A listing that rose in price is worse than when it was last shown, so it
+    must not jump the queue on the strength of having changed. Seen live: a
+    Vivobook Go went 3,000 -> 3,500 MDL and still led the digest."""
+    history = {"7": {"first_seen": "2026-08-01", "last_seen": "2026-08-04", "price": 3000}}
+    deals = [_nov(7, 3500, 900), _nov(8, 4000, 110)]
+
+    out = prioritize_by_novelty(deals, history, "2026-08-05", cooldown_days=7, min_deals=1)
+
+    assert [d["id"] for d in out] == [8], "the risen-price repeat is held back"
+
+
 def test_novelty_keeps_repeat_whose_price_moved():
     history = {"7": {"first_seen": "2026-08-01", "last_seen": "2026-08-04", "price": 5000}}
     deals = [_nov(7, 4200, 300), _nov(8, 4000, 110)]
@@ -227,6 +240,40 @@ def test_price_drops_respect_minimum_and_order():
     out = select_price_drops(drops, rows, limit=5, min_pct=10.0)
 
     assert [round(d["drop_pct"]) for d in out] == [30, 15]
+
+
+def test_price_drops_collapse_reposted_copies():
+    """Seen live: the same GPD Pocket 4 took two of the three slots under two
+    ad ids, both dropping 20,000 -> 14,000."""
+    rows = [
+        make_row(id=1, title="GPD Pocket 4", cpu="ryzen 7 8840u", ram=32, ssd=1024),
+        make_row(id=2, title="Gpd Pocket 4", cpu="ryzen 7 8840u", ram=32, ssd=1024),
+        make_row(id=3, title="Asus TUF Gaming F15", cpu="i7-12700h", ram=16, ssd=512),
+    ]
+    drops = [_drop(1, 20000, 14000, 30.0), _drop(2, 20000, 14000, 30.0),
+             _drop(3, 15000, 12000, 20.0)]
+
+    out = select_price_drops(drops, rows, limit=3)
+
+    assert [d["title"] for d in out] == ["GPD Pocket 4", "Asus TUF Gaming F15"]
+
+
+def test_price_drops_carry_fields_the_review_needs():
+    """The block is screened by the same AI review as the ranking, so its
+    entries must be shaped like deals."""
+    rows = [make_row(id=1, title="Asus TUF")]
+    out = select_price_drops([_drop(1, 15000, 10000, 33.0)], rows, limit=3)
+
+    for key in ("id", "price", "cpu", "ram", "ssd", "description"):
+        assert key in out[0], f"review payload needs {key}"
+    assert out[0]["price"] == out[0]["last_price"], "review must see the current price"
+
+
+def test_price_drop_block_renders_an_ai_warning():
+    drop = {"title": "Acer Rog Strix", "url": "https://999.md/ru/1",
+            "first_price": 18000, "last_price": 10000, "drop_pct": 44.0,
+            "ai_note": "⚠️ ROG Strix — линейка ASUS, не Acer"}
+    assert "ROG Strix" in format_price_drops([drop])
 
 
 def test_price_drop_block_absent_when_nothing_qualifies():

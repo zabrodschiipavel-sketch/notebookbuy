@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A repeat whose price went **up** was promoted as if it were news. Novelty
+  ranking compared the absolute price delta, so a listing that got more
+  expensive jumped the queue exactly like one that got cheaper. Seen in the
+  first live digest: an Asus Vivobook Go went 3,000 → 3,500 MDL and still led
+  the ranking on value score. Only a drop counts now.
+- The price-drop block was not deduplicated. It is built from raw rows rather
+  than the deduped ranking, so a re-posted listing took two of the three slots
+  — the same GPD Pocket 4 appeared twice under two ad ids, both dropping
+  20,000 → 14,000. `dedupe_deals` now runs over the block too.
+- The price-drop block bypassed the AI review entirely. A listing titled "Acer
+  Rog Strix" — ROG Strix being an ASUS line, not an Acer one — was published
+  with a -44% drop and no screening. Drops are now built before the review and
+  go into the same batch, and a warning verdict renders under the entry.
+
 - Throttling used one RPM figure for every model. The free tier is not uniform:
   flash-lite allows 15 requests per minute, full flash only 5, so the review
   was being throttled at more than twice its actual limit and would have 429ed

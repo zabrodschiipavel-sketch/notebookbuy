@@ -260,14 +260,19 @@ def _days_between(earlier: str, later: str) -> int | None:
 
 
 def _novelty_rank(deal: dict, history: dict, today: str, cooldown_days: int) -> int:
-    """0 = never shown, 1 = price moved since last shown, 2 = due again,
-    3 = unchanged and shown recently (held back)."""
+    """0 = never shown, 1 = price dropped since last shown, 2 = due again,
+    3 = nothing new and shown recently (held back).
+
+    Only a drop counts as news. A listing that got *more* expensive is worse
+    than when the reader last saw it, so it waits its turn like any other
+    repeat instead of jumping the queue on the strength of having changed.
+    """
     prev = history.get(str(deal.get("id")))
     if not prev:
         return 0
 
     old_price = prev.get("price") or 0
-    if old_price and abs(deal["price"] - old_price) / old_price > 0.01:
+    if old_price and (old_price - deal["price"]) / old_price > 0.01:
         return 1
 
     age = _days_between(prev.get("last_seen", ""), today)
@@ -439,14 +444,39 @@ def select_price_drops(
         if (row["cpu_score"] or 0) < MIN_CPU_SCORE:
             continue
         picked.append({
+            # id/specs/price travel with the entry so the block can be deduped
+            # and reviewed on the same terms as the ranking.
+            "id": row["id"],
             "title": title,
             "url": row["url"],
             "first_price": int(drop["first_price"]),
             "last_price": int(drop["last_price"]),
+            "price": int(drop["last_price"]),
             "drop_pct": pct,
+            "cpu": row["cpu"],
+            "ram": row["ram"],
+            "ssd": row["ssd"],
+            "description": description or "",
         })
     picked.sort(key=lambda d: d["drop_pct"], reverse=True)
+    # Sellers re-post the same laptop under a new id, and both copies drop in
+    # step — without this the block spends two of its three slots on one machine.
+    picked = dedupe_deals(picked)
     return picked[:limit]
+
+
+def build_price_drops(rows) -> list[dict]:
+    """Candidates for the 'got cheaper' block, or [] if the query misbehaves."""
+    if not DIGEST_PRICE_DROPS_N:
+        return []
+    try:
+        from lappars import get_price_drops
+        return select_price_drops(
+            get_price_drops(min_drop_pct=PRICE_DROP_MIN_PCT, db=DB_NAME), rows
+        )
+    except Exception as e:  # a broken drop query must not cost us the digest
+        log.warning("Could not build the price-drop block: %s", e)
+        return []
 
 
 def format_price_drops(drops: list[dict]) -> str:
@@ -458,6 +488,8 @@ def format_price_drops(drops: list[dict]) -> str:
             f"(-{d['drop_pct']:.0f}%)</code>"
             f" <a href=\"{html.escape(d['url'], quote=True)}\">открыть</a>\n"
         )
+        if d.get("ai_note"):
+            lines.append(f"   <i>{html.escape(d['ai_note'])}</i>\n")
     return "".join(lines) + "\n"
 
 
@@ -546,16 +578,25 @@ def main():
 
     # Second-pass review of the top candidates with Gemini Pro: drops scam
     # listings and parsing garbage that the regex/score pipeline lets through.
+    # The scraper detects price drops on every run and used to only log them.
+    # Built before the review so those listings are screened too: a -44% drop
+    # on a mislabelled machine is exactly what the screening exists to catch.
+    price_drops = build_price_drops(rows)
+
     if ENABLE_AI_REVIEW and AI_REVIEW_TOP_N > 0:
         # Imported lazily: pulls google-genai, needed only when review is on.
         from ai_service import AIService
 
         candidates = deals[:AI_REVIEW_TOP_N]
-        log.info("Reviewing top %d deals with Gemini Pro...", len(candidates))
-        reviews = AIService().review_deals(candidates)
+        seen_ids = {str(c["id"]) for c in candidates}
+        batch = candidates + [d for d in price_drops if str(d["id"]) not in seen_ids]
+        log.info("Reviewing %d listing(s) with Gemini...", len(batch))
+        reviews = AIService().review_deals(batch)
         if reviews:
             deals = apply_ai_review(deals, reviews)
-            log.info("AI review applied: %d deals remain", len(deals))
+            price_drops = apply_ai_review(price_drops, reviews)
+            log.info("AI review applied: %d deals, %d drops remain",
+                     len(deals), len(price_drops))
 
     if not deals:
         log.info("All candidate deals were rejected by AI review; nothing to send.")
@@ -576,16 +617,6 @@ def main():
     # Mark deals already shown in previous digests (and price moves since).
     annotate_with_history(moldova_deals + balti_deals, history, today)
 
-    # The scraper detects price drops on every run and used to only log them.
-    price_drops = []
-    if DIGEST_PRICE_DROPS_N:
-        try:
-            from lappars import get_price_drops
-            price_drops = select_price_drops(
-                get_price_drops(min_drop_pct=PRICE_DROP_MIN_PCT, db=DB_NAME), rows
-            )
-        except Exception as e:  # a broken drop query must not cost us the digest
-            log.warning("Could not build the price-drop block: %s", e)
     if price_drops:
         log.info("Price-drop block: %d listing(s)", len(price_drops))
 
