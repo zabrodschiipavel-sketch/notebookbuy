@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PRICE_DROP_MIN_PCT`/`PRICE_DROP_MAX_PCT`, because the raw list is mostly a
   seller correcting a 111111 MDL typo into a "-99% drop".
 
+### Changed
+
+- The digest review now checks whether a configuration was ever sold, not just
+  whether the specs match the title. Apple silicon starts at 256GB storage and
+  ships fixed memory sizes, so an M-series Mac listed with 128GB is a parsing
+  error — but a pre-2018 Intel MacBook Air with 128GB is genuine, and the rule
+  carries that carve-out plus an instruction to treat unknown models as
+  plausible. Measured on 4 impossible configurations and 6 genuine ones:
+
+  | model | prompt | impossible caught | genuine rejected |
+  |---|---|---|---|
+  | `gemini-flash-latest` | before | 2/4 | 0/6 |
+  | `gemini-flash-latest` | after | **4/4** | 0/6 |
+  | `gemini-3.6-flash` | before | 1/4 | 0/6 |
+  | `gemini-3.6-flash` | after | **4/4** | 0/6 |
+
+  On the earlier scam set both models also improved, 3/4 to 4/4, with no new
+  false rejections.
+
 ### Removed
 
 - `AIService.google_search_json` and the Gemini `google_search` grounding tool,
