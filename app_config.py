@@ -40,16 +40,28 @@ def _env_float(key: str, default: float) -> float:
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
-# Stronger model used to sanity-check the final top before it is sent.
-# NOTE: pro models need a billing-enabled API key; on the free tier the review
-# automatically falls back through GEMINI_REVIEW_FALLBACK_MODELS (comma-
-# separated; multiple entries survive a temporary 503 on one model).
-GEMINI_PRO_MODEL = os.getenv("GEMINI_PRO_MODEL", "gemini-pro-latest")
+# Spec extraction. Aliases are preferred over pinned versions here: a pinned
+# preview gets retired (this used to be gemini-3.1-flash-lite-preview), and on
+# this task every flash-lite generation returns identical specs in ~0.9s, so
+# there is nothing to gain from pinning one.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+
+# Model that sanity-checks the final top before it is sent. This used to
+# default to gemini-pro-latest, whose free-tier quota is 0 — so every single
+# run spent an attempt on a guaranteed failure before falling through to flash.
+# Measured on real listings from past digests, full flash catches noticeably
+# more garbage than flash-lite (3 of 4 planted scams vs 2), which is worth the
+# few extra seconds on a once-a-day call.
+# Set this to a pro model if the key ever gets billing enabled.
+GEMINI_REVIEW_MODEL = os.getenv("GEMINI_REVIEW_MODEL", "gemini-flash-latest")
+# Fallbacks survive a temporary 503 on the primary. An alias leads and a pinned
+# model backs it up: the alias cannot go stale, the pin cannot be silently
+# repointed. (The previous chain ended on gemini-2.5-flash, which now answers
+# 404 "no longer available to new users" — a dead last resort.)
 GEMINI_REVIEW_FALLBACK_MODELS = [
     m.strip()
     for m in os.getenv(
-        "GEMINI_REVIEW_FALLBACK_MODEL", "gemini-flash-latest,gemini-2.5-flash"
+        "GEMINI_REVIEW_FALLBACK_MODEL", "gemini-3.6-flash,gemini-3.1-flash-lite"
     ).split(",")
     if m.strip()
 ]

@@ -30,6 +30,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `AIService.google_search_json` and the Gemini `google_search` grounding tool,
   superseded by the Brave-backed lookups.
+- `gemini-2.5-flash` from the review fallback chain — it now answers
+  `404 NOT_FOUND: no longer available to new users`. It was the chain's last
+  resort, so the only thing standing between the digest and an unreviewed send
+  was the model ahead of it still working.
+
+### Changed
+
+- Review model defaults changed after benchmarking the candidates on real
+  listings from past digests (4 planted scams, 3 legitimate deals):
+
+  | model | scams caught | false positives | time |
+  |---|---|---|---|
+  | `gemini-3.1-flash-lite-preview` | 2/4 | 0/3 | 2.2s |
+  | `gemini-flash-latest` | 3/4 | 0/3 | 6.6s |
+  | `gemini-3.5-flash` | 3/4 | 0/3 | 8.3s |
+  | `gemini-3.6-flash` | 3/4 | 0/3 | 9.3s |
+  | `gemini-2.5-flash` | — | — | dead (404) |
+
+  `GEMINI_PRO_MODEL` is renamed to `GEMINI_REVIEW_MODEL` and defaults to
+  `gemini-flash-latest` instead of `gemini-pro-latest`, whose free-tier quota is
+  0 — every run spent an attempt on a guaranteed failure before falling through.
+  The chain is now `gemini-flash-latest → gemini-3.6-flash →
+  gemini-3.1-flash-lite`: an alias leads so it cannot go stale, a pinned model
+  backs it up so a repointed alias cannot take the whole chain down.
+- `GEMINI_MODEL` defaults to `gemini-flash-lite-latest` rather than the pinned
+  `gemini-3.1-flash-lite-preview`. On extraction every flash-lite generation
+  returned identical specs in ~0.9s, so the only thing pinning bought was
+  eventual retirement of the preview alias.
 
 ### Changed
 
