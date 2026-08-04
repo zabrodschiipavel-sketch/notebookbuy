@@ -9,12 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Brave Search grounds the world-price and Notebookcheck lookups (`web_search.py`,
+  `BRAVE_API_KEY`). Gemini's own `google_search` tool drew on the same per-model
+  quota as spec extraction, returned an answer with no visible sources, and
+  produced the 12%/15% "Notebookcheck ratings" that `plausible_nbc_score` exists
+  to throw away. Brave has a separate budget (free tier: 1 req/s, 2000/month)
+  and returns retail and review pages; the model is asked to read prices out of
+  those snippets rather than recall them, and to return 0 when the answer is not
+  there. Without the key both figures degrade to the component formula, which
+  the digest now marks as an estimate.
+
 - «Подешевели» block in the digest. The scraper detects every price drop on
   each run (141 on a typical morning) and until now only wrote them to a log
   nobody reads — the single most actionable buy signal was computed daily and
   discarded. Drops are cross-checked against analysed listings and bounded by
   `PRICE_DROP_MIN_PCT`/`PRICE_DROP_MAX_PCT`, because the raw list is mostly a
   seller correcting a 111111 MDL typo into a "-99% drop".
+
+### Removed
+
+- `AIService.google_search_json` and the Gemini `google_search` grounding tool,
+  superseded by the Brave-backed lookups.
 
 ### Changed
 

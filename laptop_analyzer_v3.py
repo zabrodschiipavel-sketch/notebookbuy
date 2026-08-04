@@ -11,6 +11,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
+import web_search
 from ai_service import AIService
 from app_config import (
     ADS_ANALYZE_LIMIT,
@@ -140,7 +141,13 @@ class LaptopAnalyzer:
 
         # If external lookups are disabled or AI client is not available,
         # we still want to apply fallback logic.
-        if ENABLE_EXTERNAL_LOOKUPS and self.ai.client:
+        if ENABLE_EXTERNAL_LOOKUPS and not web_search.is_configured():
+            log.warning(
+                "BRAVE_API_KEY is not set — world-price and Notebookcheck lookups are "
+                "skipped and every such figure in the digest will be a component estimate"
+            )
+
+        if ENABLE_EXTERNAL_LOOKUPS and self.ai.client and web_search.is_configured():
             price_cache = self._load_json_cache(WORLD_PRICE_CACHE)
             nbc_cache = self._load_json_cache(NBC_CACHE_FILE)
 
@@ -152,14 +159,14 @@ class LaptopAnalyzer:
                 # Cache key: CPU + GPU + RAM (shared with dashboard/notifier)
                 key = external_cache_key(lap['cpu'], lap['gpu'], lap['ram'])
 
-                def lookup(cache: dict, label: str, prompt: str) -> dict:
+                def lookup(cache: dict, label: str, fetch) -> dict:
                     nonlocal dirty
                     cached = cache.get(key)
                     if _is_fresh_cache_entry(cached):
                         return {} if _is_miss(cached) else cached
 
                     log.info(f"Searching {label}: {lap['title'][:30]}")
-                    data = self.ai.google_search_json(prompt)
+                    data = fetch()
                     # Remember failures too, otherwise the next run re-asks the
                     # same dead question and spends the quota again.
                     cache[key] = data if data else _miss_entry()
@@ -168,18 +175,12 @@ class LaptopAnalyzer:
                     return data
 
                 p_data = lookup(
-                    price_cache,
-                    "World Price",
-                    f"Search launch price and current global price (USD) for laptop: "
-                    f"{lap['title']} CPU: {lap['cpu']} GPU: {lap['gpu']}. "
-                    f"Return JSON: {{\"launch_usd\": N, \"current_usd\": N}}",
+                    price_cache, "World Price",
+                    lambda: self.ai.lookup_world_price(lap['title'], lap['cpu'], lap['gpu']),
                 )
                 r_data = lookup(
-                    nbc_cache,
-                    "Review",
-                    f"Find rating on Notebookcheck.net for: {lap['title']} "
-                    f"CPU: {lap['cpu']} GPU: {lap['gpu']}. "
-                    f"Return JSON: {{\"score\": int_percentage, \"url\": \"url\"}}",
+                    nbc_cache, "Review",
+                    lambda: self.ai.lookup_nbc_score(lap['title'], lap['cpu'], lap['gpu']),
                 )
 
                 return lap['id'], p_data, r_data
