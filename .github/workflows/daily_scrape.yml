@@ -47,9 +47,13 @@ jobs:
           python lappars.py --once --region all
 
       # Запуск анализатора и генерации отчетов
+      # BRAVE_API_KEY нужен для поиска реальных мировых цен и оценок
+      # Notebookcheck; без него эти числа деградируют до оценки по компонентам
+      # (дайджест помечает такие значения знаком ≈).
       - name: Run Analyzer
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
           python laptop_analyzer_v3.py
 

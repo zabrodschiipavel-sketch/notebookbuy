@@ -1,6 +1,8 @@
 """Tests for the Gemini deal-review wrapper (no network)."""
 import json
 
+import ai_service
+import retry_utils
 from ai_service import AIService
 from app_config import (
     GEMINI_MAX_RETRIES,
@@ -97,6 +99,61 @@ def test_extract_specs_reports_failures(monkeypatch, caplog):
 
     assert [r["id"] for r in out] == ["1"]
     assert "1/2 ads parsed, 1 failed" in caplog.text
+
+
+def test_world_price_lookup_reads_brave_snippets(monkeypatch):
+    """The model must extract from real results, not recall a price."""
+    seen = {}
+
+    class Models:
+        @staticmethod
+        def generate_content(model, contents, config):
+            seen["prompt"] = contents
+            return _Resp(json.dumps({"launch_usd": 1299, "current_usd": 899}))
+
+    monkeypatch.setattr(
+        ai_service.web_search, "search",
+        lambda q, count=5: [{"title": "Zenbook 14 deal", "url": "https://shop/x",
+                             "description": "now $899, was $1299"}],
+    )
+    svc = _service_with_models(Models())
+    out = svc.lookup_world_price("Asus Zenbook 14", "Ryzen 7 8845HS", "integrated")
+
+    assert out == {"launch_usd": 1299, "current_usd": 899}
+    assert "$899" in seen["prompt"], "the snippet has to reach the model"
+
+
+def test_lookups_return_empty_without_search_results(monkeypatch):
+    """No Brave key or a failed search means no lookup at all — the caller then
+    falls back to the component estimate, which the digest marks as one."""
+    called = []
+
+    class Models:
+        @staticmethod
+        def generate_content(model, contents, config):
+            called.append(1)
+            return _Resp("{}")
+
+    monkeypatch.setattr(ai_service.web_search, "search", lambda q, count=5: [])
+    svc = _service_with_models(Models())
+
+    assert svc.lookup_world_price("X", "cpu", "gpu") == {}
+    assert svc.lookup_nbc_score("X", "cpu", "gpu") == {}
+    assert called == [], "no snippets means the model is never asked"
+
+
+def test_nbc_lookup_survives_a_model_failure(monkeypatch):
+    class Models:
+        @staticmethod
+        def generate_content(model, contents, config):
+            raise RuntimeError("503 UNAVAILABLE")
+
+    monkeypatch.setattr(retry_utils.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        ai_service.web_search, "search",
+        lambda q, count=5: [{"title": "t", "url": "u", "description": "d"}],
+    )
+    assert _service_with_models(Models()).lookup_nbc_score("X", "cpu", "gpu") == {}
 
 
 def test_review_explicit_model_skips_fallback(monkeypatch):
