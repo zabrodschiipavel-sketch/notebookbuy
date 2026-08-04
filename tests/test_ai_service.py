@@ -67,6 +67,22 @@ def test_review_returns_empty_when_all_models_fail(monkeypatch):
     assert calls.count(GEMINI_REVIEW_MODEL) == 1
 
 
+def test_review_prompt_keeps_the_intel_era_carve_out():
+    """The impossible-configuration rule must keep its exception.
+
+    Told only that a 128GB MacBook Air is fake, the model starts rejecting
+    genuine pre-2018 Intel Airs, which really did ship with 128GB. Measured:
+    with the carve-out both flash models scored 4/4 on impossible configs and
+    0/6 false rejections; the rule alone is not safe to ship without it.
+    """
+    prompt = AIService._REVIEW_SYSTEM_PROMPT
+    assert "256GB" in prompt, "the Apple silicon storage floor is the rule itself"
+    assert "Intel MacBook Air" in prompt and "must NOT be rejected" in prompt
+    assert "treat the configuration as plausible" in prompt, (
+        "without the when-unsure clause the verdict starts deleting listings on a guess"
+    )
+
+
 def test_limiter_is_shared_per_model_not_per_call():
     """One budget per model: Gemini's RPM quota is per-model, and every caller
     of that model has to draw from the same bucket or throttling is pointless."""

@@ -132,15 +132,30 @@ class AIService:
             )
         return results
 
+    # Criterion (2) is carried by the caveat as much as by the rule: an
+    # M-series Mac with a 128GB SSD is a parsing error, but a 2015 Intel Air
+    # with one is genuine, and a model told only "128GB Airs are fake" trades
+    # a miss for a false rejection. The "when unsure, treat as plausible" line
+    # is there for the same reason — this verdict deletes listings.
     _REVIEW_SYSTEM_PROMPT = (
         "You review used-laptop listings from the Moldovan marketplace 999.md "
         "before they reach a buyer's Telegram digest. For each listing judge: "
         "(1) do the parsed specs contradict the model in the title (e.g. a "
         "Xiaomi or 2013-era laptop 'with' an Apple M2 or i7-14700HX, 128GB RAM "
-        "on a budget machine — usually parsing errors); (2) does the deal look "
-        "legitimate (a near-new MacBook at a fraction of market price is a "
-        "scam or an iCloud/MDM-locked unit); (3) is it a real sale ad at all "
-        "(not an accessories ad, a description fragment, or shop spam). "
+        "on a budget machine — usually parsing errors); "
+        "(2) is this a configuration the manufacturer ever actually sold? Apple "
+        "silicon (M1/M2/M3/M4) starts at 256GB storage and ships only 8/16/24/32/"
+        "36/48GB of unified memory — an M-series Mac listed with 64GB or 128GB "
+        "storage is a parsing error, while a pre-2018 Intel MacBook Air with a "
+        "128GB SSD is genuine and must NOT be rejected. Judge non-Apple machines "
+        "the same way: a current high-end CPU paired with 4GB of RAM, or storage "
+        "smaller than the RAM, is parsed wrong rather than a real bargain. "
+        "When a model's real options are not something you know, treat the "
+        "configuration as plausible instead of guessing; "
+        "(3) does the deal look legitimate (a near-new MacBook at a fraction of "
+        "market price is a scam or an iCloud/MDM-locked unit); "
+        "(4) is it a real sale ad at all (not an accessories ad, a description "
+        "fragment, or shop spam). "
         "Verdicts: 'exclude' = certain garbage/scam, must not be shown; "
         "'suspicious' = show but warn the buyer what to verify; 'ok' = "
         "plausible; 'great' = specs consistent and genuinely good value. "
