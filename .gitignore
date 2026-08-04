@@ -6,6 +6,10 @@ __pycache__/
 .venv/
 venv/
 env/
+# Left behind by `pip install -e .`
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 
 # IDE
 .idea/
@@ -36,6 +40,7 @@ digest_history.json
 build/
 dist/
 *.spec
+!laptop_finder.spec   # the build recipe is tracked on purpose
 *.exe
 
 # Environment variables

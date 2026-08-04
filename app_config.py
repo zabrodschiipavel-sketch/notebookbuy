@@ -63,8 +63,20 @@ GEMINI_MAX_WORKERS = max(1, _env_int("GEMINI_MAX_WORKERS", 3))
 GEMINI_REQUEST_DELAY_SEC = max(0.0, _env_float("GEMINI_REQUEST_DELAY_SEC", 0.5))
 GEMINI_SEARCH_DELAY_SEC = max(0.0, _env_float("GEMINI_SEARCH_DELAY_SEC", 1.5))
 GEMINI_MAX_RETRIES = max(1, _env_int("GEMINI_MAX_RETRIES", 3))
+# Requests per minute allowed *per model*. Gemini's free tier grants 15 RPM
+# (quota GenerateRequestsPerMinutePerProjectPerModel); without client-side
+# throttling the worker pool spends that budget in seconds and everything after
+# it returns 429. Keep a little headroom for clock skew and retries.
+GEMINI_RPM_LIMIT = max(1, _env_int("GEMINI_RPM_LIMIT", 12))
+# Longest single back-off. The digest runs once a day, so waiting out the
+# server's suggested delay is cheaper than dropping the ad.
+GEMINI_MAX_BACKOFF_SEC = max(1.0, _env_float("GEMINI_MAX_BACKOFF_SEC", 65.0))
 
 ENABLE_EXTERNAL_LOOKUPS = _env_bool("ENABLE_EXTERNAL_LOOKUPS", True)
+# How long a failed world-price / Notebookcheck lookup stays remembered. Without
+# negative caching every run re-asks for the same laptops that have no answer,
+# which is exactly the quota the ads themselves need.
+EXTERNAL_MISS_TTL_DAYS = max(1, _env_int("EXTERNAL_MISS_TTL_DAYS", 7))
 
 MIN_CPU_SCORE = _env_int("MIN_CPU_SCORE", DEFAULT_MIN_CPU_SCORE)
 ADS_ANALYZE_LIMIT = max(1, _env_int("ADS_ANALYZE_LIMIT", 500))

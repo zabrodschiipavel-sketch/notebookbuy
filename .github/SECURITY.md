@@ -12,7 +12,7 @@ Please **do not** open a public GitHub issue for security vulnerabilities or pas
 
 Instead:
 
-1. Open a [private security advisory](https://github.com/pravel-no/notebookbuy/security/advisories/new) on GitHub, or
+1. Open a [private security advisory](https://github.com/zabrodschiipavel-sketch/notebookbuy/security/advisories/new) on GitHub, or
 2. Contact the maintainer through GitHub with minimal details and request a secure channel.
 
 Include steps to reproduce, impact, and affected version when possible.

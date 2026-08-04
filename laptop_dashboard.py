@@ -378,7 +378,7 @@ fig.update_layout(
     xaxis=dict(showgrid=True, gridcolor="#e0e0e0"), # Lighter grid lines
     yaxis=dict(showgrid=True, gridcolor="#e0e0e0") # Lighter grid lines
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # Detail Inspector Section
 st.subheader("🔎 Detail & Price History Inspector")
@@ -420,7 +420,7 @@ if selected_id:
 
         with c_detail2:
             if ad_row["image_url"]:
-                st.image(ad_row["image_url"], caption="Listing Image", use_container_width=True)
+                st.image(ad_row["image_url"], caption="Listing Image", width="stretch")
 
             st.markdown("#### 📈 Price History")
             if history_rows:
@@ -443,7 +443,7 @@ if selected_id:
                     xaxis=dict(showgrid=False),
                     yaxis=dict(showgrid=True, gridcolor="#e0e0e0") # Lighter grid lines
                 )
-                st.plotly_chart(fig_hist, use_container_width=True)
+                st.plotly_chart(fig_hist, width="stretch")
 
                 first_p = history_df["price"].iloc[0]
                 last_p = history_df["price"].iloc[-1]

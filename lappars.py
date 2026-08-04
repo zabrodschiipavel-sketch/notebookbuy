@@ -89,21 +89,20 @@ def get_price_drops(min_drop_pct: float = 5.0, db: str = DB_NAME) -> list[dict]:
                 COUNT(ph.id)      AS records
             FROM ads a
             JOIN price_history ph       ON ph.ad_id = a.id
+            -- Anchored on the autoincrement id, not recorded_at: two snapshots
+            -- taken inside the same clock tick share a timestamp, and then
+            -- MIN(recorded_at) = MAX(recorded_at) matched both rows and the
+            -- drop silently evaluated to 0%.
             JOIN (
                 SELECT ad_id, price
                 FROM price_history
-                WHERE (ad_id, recorded_at) IN (
-                    SELECT ad_id, MIN(recorded_at) FROM price_history GROUP BY ad_id
-                )
+                WHERE id IN (SELECT MIN(id) FROM price_history GROUP BY ad_id)
             ) ph_first ON ph_first.ad_id = a.id
             JOIN (
                 SELECT ad_id, price
                 FROM price_history
-                WHERE (ad_id, recorded_at) IN (
-                    SELECT ad_id, MAX(recorded_at) FROM price_history GROUP BY ad_id
-                )
+                WHERE id IN (SELECT MAX(id) FROM price_history GROUP BY ad_id)
             ) ph_last ON ph_last.ad_id = a.id
-            WHERE ph.ad_id = a.id
             GROUP BY a.id
             HAVING records > 1
                AND ph_first.price > 0

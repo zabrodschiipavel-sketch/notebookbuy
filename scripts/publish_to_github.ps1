@@ -20,7 +20,7 @@ Write-Host "GitHub user: $login"
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
 
-$expectedOwner = "pravel-no"
+$expectedOwner = "zabrodschiipavel-sketch"
 if ($login -ne $expectedOwner) {
     Write-Warning -Message "Docs use github.com/$expectedOwner/notebookbuy but you are logged in as $login."
 }

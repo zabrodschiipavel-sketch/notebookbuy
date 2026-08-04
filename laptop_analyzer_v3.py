@@ -16,6 +16,7 @@ from app_config import (
     ADS_ANALYZE_LIMIT,
     DB_NAME,
     ENABLE_EXTERNAL_LOOKUPS,
+    EXTERNAL_MISS_TTL_DAYS,
     GEMINI_API_KEY,
     GEMINI_MAX_WORKERS,
     GEMINI_SEARCH_DELAY_SEC,
@@ -47,6 +48,32 @@ from scoring import (
 # ================= 1. CONFIGURATION =================
 WORLD_PRICE_CACHE = "pricehistory_cache.json"
 NBC_CACHE_FILE = "notebookcheck_cache.json"
+
+# Marker stored for lookups that returned nothing, so a dead question is not
+# re-asked on every run. Positive hits written before this existed have no
+# marker and stay valid forever, as they did before.
+_MISS_MARKER = "__miss_at__"
+
+
+def _miss_entry() -> dict:
+    return {_MISS_MARKER: datetime.date.today().isoformat()}
+
+
+def _is_miss(entry: object) -> bool:
+    return isinstance(entry, dict) and _MISS_MARKER in entry
+
+
+def _is_fresh_cache_entry(entry: object) -> bool:
+    """True when the cached answer can be reused instead of re-querying."""
+    if not entry:
+        return False
+    if not _is_miss(entry):
+        return True
+    try:
+        recorded = datetime.date.fromisoformat(entry[_MISS_MARKER])
+    except (TypeError, ValueError):
+        return False
+    return (datetime.date.today() - recorded).days < EXTERNAL_MISS_TTL_DAYS
 
 if not GEMINI_API_KEY:
     logging.warning("GEMINI_API_KEY is not set — AI extraction and external lookups will be skipped")
@@ -125,33 +152,35 @@ class LaptopAnalyzer:
                 # Cache key: CPU + GPU + RAM (shared with dashboard/notifier)
                 key = external_cache_key(lap['cpu'], lap['gpu'], lap['ram'])
 
-                p_data = price_cache.get(key)
-                if not p_data:
-                    log.info(f"Searching World Price: {lap['title'][:30]}")
-                    p_prompt = (
-                        f"Search launch price and current global price (USD) for laptop: "
-                        f"{lap['title']} CPU: {lap['cpu']} GPU: {lap['gpu']}. "
-                        f"Return JSON: {{\"launch_usd\": N, \"current_usd\": N}}"
-                    )
-                    p_data = self.ai.google_search_json(p_prompt)
-                    if p_data:
-                        price_cache[key] = p_data
-                        dirty = True
-                    time.sleep(GEMINI_SEARCH_DELAY_SEC)  # Minimal delay between searches
+                def lookup(cache: dict, label: str, prompt: str) -> dict:
+                    nonlocal dirty
+                    cached = cache.get(key)
+                    if _is_fresh_cache_entry(cached):
+                        return {} if _is_miss(cached) else cached
 
-                r_data = nbc_cache.get(key)
-                if not r_data:
-                    log.info(f"Searching Review: {lap['title'][:30]}")
-                    r_prompt = (
-                        f"Find rating on Notebookcheck.net for: {lap['title']} "
-                        f"CPU: {lap['cpu']} GPU: {lap['gpu']}. "
-                        f"Return JSON: {{\"score\": int_percentage, \"url\": \"url\"}}"
-                    )
-                    r_data = self.ai.google_search_json(r_prompt)
-                    if r_data:
-                        nbc_cache[key] = r_data
-                        dirty = True
-                    time.sleep(GEMINI_SEARCH_DELAY_SEC)
+                    log.info(f"Searching {label}: {lap['title'][:30]}")
+                    data = self.ai.google_search_json(prompt)
+                    # Remember failures too, otherwise the next run re-asks the
+                    # same dead question and spends the quota again.
+                    cache[key] = data if data else _miss_entry()
+                    dirty = True
+                    time.sleep(GEMINI_SEARCH_DELAY_SEC)  # Minimal delay between searches
+                    return data
+
+                p_data = lookup(
+                    price_cache,
+                    "World Price",
+                    f"Search launch price and current global price (USD) for laptop: "
+                    f"{lap['title']} CPU: {lap['cpu']} GPU: {lap['gpu']}. "
+                    f"Return JSON: {{\"launch_usd\": N, \"current_usd\": N}}",
+                )
+                r_data = lookup(
+                    nbc_cache,
+                    "Review",
+                    f"Find rating on Notebookcheck.net for: {lap['title']} "
+                    f"CPU: {lap['cpu']} GPU: {lap['gpu']}. "
+                    f"Return JSON: {{\"score\": int_percentage, \"url\": \"url\"}}",
+                )
 
                 return lap['id'], p_data, r_data
 
