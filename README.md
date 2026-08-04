@@ -17,6 +17,7 @@
 | **GraphQL Scraper** | Direct API queries — no HTML parsing overhead |
 | **Hardware Scoring** | Passmark CPU + GPU fuzzy-match benchmarks |
 | **AI Spec Extraction** | Gemini-powered fallback when regex can't parse the ad |
+| **Real World Prices** | Brave Search finds retail listings; the model reads prices out of them |
 | **Dynamic FX Rates** | USD/EUR → MDL rates auto-fetched & cached for 24 h |
 | **Price Tracking** | Every price change is recorded; history visualized per ad |
 | **Premium Dashboard** | Dark-themed Streamlit UI with scatter plots, filters, and CSV/JSON export |
@@ -100,6 +101,8 @@ cp .env.example .env   # Windows: copy .env.example .env
 ```
 
 `GEMINI_API_KEY` is **optional**. Without it, the pipeline uses regex parsing and Passmark benchmarks (Passmark data is downloaded on first analyzer run). Add a key only if you want AI fallback for unclear ads or world-price lookups.
+
+`BRAVE_API_KEY` is also optional and powers the world-price and Notebookcheck lookups: Brave returns real retail and review pages, and the model extracts the figures from those snippets rather than recalling them. Without it those two numbers come from the component formula, and the digest marks them `≈` so an estimate is never mistaken for market data. The free tier (1 req/s, 2000/month) is far more than a daily run needs.
 
 ### 3. Run
 

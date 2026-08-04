@@ -2,7 +2,6 @@
 import json
 import logging
 import os
-import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -10,7 +9,9 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+import web_search
 from app_config import (
+    BRAVE_RESULTS,
     GEMINI_API_KEY,
     GEMINI_MAX_BACKOFF_SEC,
     GEMINI_MAX_RETRIES,
@@ -234,36 +235,79 @@ class AIService:
         log.warning("All review models failed; sending digest without AI review")
         return {}
 
-    def google_search_json(self, prompt: str) -> dict[str, Any]:
+    def _extract_json(self, instruction: str, context: str, schema, label: str) -> dict[str, Any]:
+        """Read structured data out of search snippets (no grounding tool)."""
         if not self.client:
             return {}
-
         try:
             resp = call_with_retry(
                 lambda: self.client.models.generate_content(
                     model=GEMINI_MODEL,
-                    contents=prompt,
+                    contents=f"{instruction}\n\nРезультаты поиска:\n{context}",
                     config=types.GenerateContentConfig(
-                        tools=[types.Tool(google_search=types.GoogleSearch())],
+                        response_mime_type="application/json",
+                        response_schema=schema,
                         temperature=0.0,
                     ),
                 ),
                 max_retries=GEMINI_MAX_RETRIES,
                 base_delay_sec=GEMINI_SEARCH_DELAY_SEC or 1.0,
-                label="google_search_json",
+                label=label,
                 max_delay_sec=GEMINI_MAX_BACKOFF_SEC,
                 limiter=self.limiter_for(GEMINI_MODEL),
             )
-            text = resp.text
-            decoder = json.JSONDecoder()
-            start = text.find("{")
-            if start != -1:
-                obj, _ = decoder.raw_decode(text[start:])
-                if isinstance(obj, dict):
-                    return obj
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
+            data = json.loads(resp.text)
+            return data if isinstance(data, dict) else {}
         except Exception as e:
-            log.warning(f"Search tool error: {e}")
-        return {}
+            log.warning("%s failed: %s", label, e)
+            return {}
+
+    _WORLD_PRICE_SCHEMA = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "launch_usd": types.Schema(type=types.Type.NUMBER),
+            "current_usd": types.Schema(type=types.Type.NUMBER),
+        },
+        required=["launch_usd", "current_usd"],
+    )
+
+    _NBC_SCHEMA = types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "score": types.Schema(type=types.Type.INTEGER),
+            "url": types.Schema(type=types.Type.STRING),
+        },
+        required=["score", "url"],
+    )
+
+    def lookup_world_price(self, title: str, cpu: str, gpu: str) -> dict[str, Any]:
+        """Launch and current USD price, read out of real search results."""
+        results = web_search.search(f"{title} {cpu} laptop price USD", count=BRAVE_RESULTS)
+        if not results:
+            return {}
+        return self._extract_json(
+            "Из результатов поиска определи цены НОВОГО ноутбука в долларах США: "
+            "launch_usd — цена на старте продаж, current_usd — актуальная розничная. "
+            "Бери только цены самого ноутбука, не аксессуаров и не б/у. "
+            "Если данных нет — верни 0 в соответствующем поле.",
+            web_search.as_context(results),
+            self._WORLD_PRICE_SCHEMA,
+            f"world_price:{title[:30]}",
+        )
+
+    def lookup_nbc_score(self, title: str, cpu: str, gpu: str) -> dict[str, Any]:
+        """Notebookcheck verdict for the model, read out of real search results."""
+        results = web_search.search(
+            f"notebookcheck review {title} {cpu} rating", count=BRAVE_RESULTS
+        )
+        if not results:
+            return {}
+        return self._extract_json(
+            "Найди в результатах итоговую оценку Notebookcheck для этого ноутбука "
+            "в процентах и ссылку на обзор. Оценка Notebookcheck обычно 50–95%. "
+            "Если оценки нет — верни score 0 и пустой url. Не выдумывай число.",
+            web_search.as_context(results),
+            self._NBC_SCHEMA,
+            f"nbc_score:{title[:30]}",
+        )
+

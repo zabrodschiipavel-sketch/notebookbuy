@@ -93,6 +93,14 @@ GEMINI_RPM_LIMIT = max(1, _env_int("GEMINI_RPM_LIMIT", 12))
 GEMINI_MAX_BACKOFF_SEC = max(1.0, _env_float("GEMINI_MAX_BACKOFF_SEC", 65.0))
 
 ENABLE_EXTERNAL_LOOKUPS = _env_bool("ENABLE_EXTERNAL_LOOKUPS", True)
+
+# Brave Search grounds the world-price and Notebookcheck lookups in real
+# results instead of asking Gemini to recall a price. Free tier: 1 request per
+# second, 2000 per month — and that budget may be shared with other projects
+# using the same key, so lookups stay capped and cached.
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "").strip()
+BRAVE_TIMEOUT_SEC = max(5.0, _env_float("BRAVE_TIMEOUT_SEC", 20.0))
+BRAVE_RESULTS = max(1, _env_int("BRAVE_RESULTS", 5))
 # How long a failed world-price / Notebookcheck lookup stays remembered. Without
 # negative caching every run re-asks for the same laptops that have no answer,
 # which is exactly the quota the ads themselves need.
