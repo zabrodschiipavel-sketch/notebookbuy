@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- «Подешевели» block in the digest. The scraper detects every price drop on
+  each run (141 on a typical morning) and until now only wrote them to a log
+  nobody reads — the single most actionable buy signal was computed daily and
+  discarded. Drops are cross-checked against analysed listings and bounded by
+  `PRICE_DROP_MIN_PCT`/`PRICE_DROP_MAX_PCT`, because the raw list is mostly a
+  seller correcting a 111111 MDL typo into a "-99% drop".
+
+### Changed
+
+- Estimated numbers are no longer presented as researched data. When the world
+  price or the Notebookcheck rating comes from the component formula the digest
+  marks it `≈` and relabels it (`vs расчёт`, `Класс` instead of `vs World`,
+  `NBC Score`), with one footnote explaining the sign. Across 146 past digests
+  not a single estimate was marked, while `NBC Score` took only 16 distinct
+  values — 65 of them an impossible flat `100%`.
+- Repeats are held back. A listing already shown at an unchanged price waits
+  `DIGEST_REPEAT_COOLDOWN_DAYS` (default 7) before it can return; any price
+  move makes it eligible immediately, and new listings are ordered ahead of
+  repeats. Held-back entries are added back when the digest would otherwise
+  shrink below `DIGEST_MIN_DEALS`. Two thirds of past digest slots went to
+  listings already seen unchanged, one of them for 22 days straight.
+- The city section (`DIGEST_REGION`, default Бельцы) renders only when it has
+  listings. It sat empty in 133 of 146 digests, spending a heading and a
+  "nothing found" line every day on 1.4% of the listings.
+
 ### Fixed
 
 - **Gemini calls were being rate-limited into uselessness on every run.** The

@@ -59,6 +59,26 @@ GEMINI_REVIEW_FALLBACK_MODELS = [
 ENABLE_AI_REVIEW = _env_bool("ENABLE_AI_REVIEW", True)
 AI_REVIEW_TOP_N = max(0, _env_int("AI_REVIEW_TOP_N", 15))
 
+# Repeat handling. A listing already shown, at a price that has not moved, is
+# not news — it is held back for this many days. Any price change makes it
+# eligible again immediately.
+DIGEST_REPEAT_COOLDOWN_DAYS = max(0, _env_int("DIGEST_REPEAT_COOLDOWN_DAYS", 7))
+# ...but never at the cost of an empty digest: held-back listings are added
+# back, best first, until the digest has at least this many entries.
+DIGEST_MIN_DEALS = max(0, _env_int("DIGEST_MIN_DEALS", 3))
+
+# Second, city-specific section of the digest. It is rendered only when it has
+# something in it: the hardcoded Bălți block sat empty in 91% of past digests
+# and cost a heading plus a "nothing found" line every single day.
+DIGEST_REGION = os.getenv("DIGEST_REGION", "Бельцы").strip()
+
+# "Got cheaper" block. The scraper already detects every price drop (141 on a
+# typical morning) and only logged them. Bounds matter: a 99% "drop" is a
+# seller fixing a 111111 MDL typo, not a bargain.
+DIGEST_PRICE_DROPS_N = max(0, _env_int("DIGEST_PRICE_DROPS_N", 3))
+PRICE_DROP_MIN_PCT = max(1.0, _env_float("PRICE_DROP_MIN_PCT", 10.0))
+PRICE_DROP_MAX_PCT = max(1.0, _env_float("PRICE_DROP_MAX_PCT", 70.0))
+
 GEMINI_MAX_WORKERS = max(1, _env_int("GEMINI_MAX_WORKERS", 3))
 GEMINI_REQUEST_DELAY_SEC = max(0.0, _env_float("GEMINI_REQUEST_DELAY_SEC", 0.5))
 GEMINI_SEARCH_DELAY_SEC = max(0.0, _env_float("GEMINI_SEARCH_DELAY_SEC", 1.5))
