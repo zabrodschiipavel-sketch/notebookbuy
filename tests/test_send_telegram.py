@@ -1,13 +1,17 @@
 """Tests for the Telegram digest: deal selection, cache lookup, formatting."""
+from app_config import DIGEST_REGION
 from estimation import external_cache_key, plausible_nbc_score
 from send_telegram import (
     TELEGRAM_MSG_LIMIT,
     annotate_with_history,
     apply_ai_review,
+    build_digest,
     clip_to_limit,
     dedupe_deals,
     format_deal,
+    prioritize_by_novelty,
     process_deals,
+    select_price_drops,
     split_message,
     update_history,
 )
@@ -60,6 +64,182 @@ def test_world_price_cache_hit_uses_component_key():
     assert len(deals) == 1
     assert deals[0]["vs_str"] == "-72%"  # (5000 - 18000) / 18000
     assert deals[0]["nbc_score"] == 87
+
+
+def test_real_lookup_is_not_marked_as_an_estimate():
+    row = make_row()
+    key = external_cache_key(row["cpu"], row["gpu"], row["ram"])
+    deals = process_deals([row], {key: {"current_usd": 1000}}, {key: {"score": 87}}, COMPONENTS)
+
+    assert deals[0]["vs_estimated"] is False
+    assert deals[0]["nbc_estimated"] is False
+    rendered = format_deal(1, deals[0])
+    assert "vs мировая цена" in rendered
+    assert "NBC Score" in rendered
+    assert "≈" not in rendered
+
+
+def test_fallback_values_are_marked_and_relabelled():
+    """Empty caches mean both numbers are component arithmetic; the digest must
+    not present them as a world price or a Notebookcheck rating."""
+    deals = process_deals([make_row()], {}, {}, COMPONENTS)
+
+    assert deals[0]["vs_estimated"] is True
+    assert deals[0]["nbc_estimated"] is True
+    rendered = format_deal(1, deals[0])
+    assert "≈" in rendered
+    assert "vs расчёт" in rendered
+    assert "Класс:" in rendered
+    assert "vs World" not in rendered
+    assert "NBC Score" not in rendered
+
+
+def test_implausible_ai_rating_counts_as_an_estimate():
+    """A 12% hallucination is discarded in favour of the formula — and the
+    resulting number is an estimate, so it has to be marked as one."""
+    row = make_row()
+    key = external_cache_key(row["cpu"], row["gpu"], row["ram"])
+    deals = process_deals([row], {}, {key: {"score": 12}}, COMPONENTS)
+
+    assert deals[0]["nbc_estimated"] is True
+    assert deals[0]["nbc_score"] != 12
+
+
+def _nov(ad_id, price, value):
+    return {"id": ad_id, "price": price, "value_score": value}
+
+
+def test_novelty_holds_back_unchanged_repeat():
+    """An ad shown yesterday at the same price is not news."""
+    history = {"7": {"first_seen": "2026-08-01", "last_seen": "2026-08-04", "price": 5000}}
+    deals = [_nov(7, 5000, 300), _nov(8, 4000, 110)]
+
+    out = prioritize_by_novelty(deals, history, "2026-08-05", cooldown_days=7, min_deals=1)
+
+    assert [d["id"] for d in out] == [8], "the stale repeat should be dropped despite a higher score"
+
+
+def test_novelty_keeps_repeat_whose_price_moved():
+    history = {"7": {"first_seen": "2026-08-01", "last_seen": "2026-08-04", "price": 5000}}
+    deals = [_nov(7, 4200, 300), _nov(8, 4000, 110)]
+
+    out = prioritize_by_novelty(deals, history, "2026-08-05", cooldown_days=7, min_deals=1)
+
+    # 8 has never been shown, so it leads; the point is that 7 survives at all —
+    # the same listing at an unchanged price would have been held back.
+    assert [d["id"] for d in out] == [8, 7]
+
+
+def test_novelty_puts_new_listings_first():
+    """A brand-new listing outranks a price-changed repeat with a better score."""
+    history = {"7": {"first_seen": "2026-08-01", "last_seen": "2026-08-04", "price": 5000}}
+    deals = [_nov(7, 4200, 900), _nov(9, 4000, 110)]
+
+    out = prioritize_by_novelty(deals, history, "2026-08-05", cooldown_days=7, min_deals=0)
+
+    assert [d["id"] for d in out] == [9, 7]
+
+
+def test_novelty_reappears_after_cooldown():
+    history = {"7": {"first_seen": "2026-07-01", "last_seen": "2026-07-28", "price": 5000}}
+    out = prioritize_by_novelty([_nov(7, 5000, 300)], history, "2026-08-05",
+                                cooldown_days=7, min_deals=0)
+    assert [d["id"] for d in out] == [7]
+
+
+def test_novelty_never_empties_the_digest():
+    """Suppression must not make the digest thinner than it already is."""
+    history = {
+        "1": {"first_seen": "2026-08-01", "last_seen": "2026-08-04", "price": 5000},
+        "2": {"first_seen": "2026-08-01", "last_seen": "2026-08-04", "price": 4000},
+    }
+    deals = [_nov(1, 5000, 300), _nov(2, 4000, 200)]
+
+    out = prioritize_by_novelty(deals, history, "2026-08-05", cooldown_days=7, min_deals=3)
+
+    assert [d["id"] for d in out] == [1, 2], "all held-back deals return when nothing else is left"
+
+
+def test_novelty_corrupt_history_date_does_not_suppress():
+    history = {"7": {"first_seen": "??", "last_seen": "not-a-date", "price": 5000}}
+    out = prioritize_by_novelty([_nov(7, 5000, 300)], history, "2026-08-05",
+                                cooldown_days=7, min_deals=0)
+    assert [d["id"] for d in out] == [7]
+
+
+def test_empty_city_section_is_omitted():
+    """The Bălți block was empty in 91% of past digests; it must not be sent
+    just to say nothing was found."""
+    deal = {
+        "id": 1, "title": "Lenovo Legion 5", "price": 5000, "url": "https://999.md/ru/1",
+        "value_score": 150.0, "vs_str": "-20%", "nbc_score": 80, "cpu": "i7", "ram": 16,
+        "ssd": 512, "brand": "LENOVO", "risk": "", "region": "Кишинёв",
+    }
+    text = "".join(build_digest([deal], []))
+
+    assert "не найдено" not in text
+    assert "ТОП-5" in text  # the Moldova section is still there
+
+
+def test_city_section_rendered_when_it_has_deals():
+    deal = {
+        "id": 1, "title": "Lenovo Legion 5", "price": 5000, "url": "https://999.md/ru/1",
+        "value_score": 150.0, "vs_str": "-20%", "nbc_score": 80, "cpu": "i7", "ram": 16,
+        "ssd": 512, "brand": "LENOVO", "risk": "", "region": "Бельцы",
+    }
+    text = "".join(build_digest([deal], [deal]))
+
+    assert DIGEST_REGION.upper() in text
+
+
+def _drop(ad_id, first, last, pct):
+    return {"ad_id": ad_id, "first_price": first, "last_price": last, "drop_pct": pct}
+
+
+def test_price_drops_filter_out_typo_corrections():
+    """A 99% 'drop' is a seller fixing a 111111 MDL typo, not a bargain."""
+    rows = [make_row(id=1, title="Lenovo Legion 5"), make_row(id=2, title="HP EliteBook 840 G3")]
+    drops = [_drop(2, 111111, 1000, 99.1), _drop(1, 14000, 7000, 50.0)]
+
+    out = select_price_drops(drops, rows, limit=5)
+
+    assert [d["last_price"] for d in out] == [7000]
+
+
+def test_price_drops_skip_parts_and_unanalyzed_ads():
+    rows = [make_row(id=1, title="Dell Inspiron 5558 la piese")]
+    drops = [_drop(1, 800, 400, 50.0), _drop(99, 9000, 6000, 33.0)]
+
+    assert select_price_drops(drops, rows, limit=5) == []
+
+
+def test_price_drops_skip_weak_hardware():
+    """A cheap no-name whose price moved is not a deal worth reporting."""
+    rows = [make_row(id=1, title="Ноутбук", cpu_score=300, gpu_score=0)]
+
+    assert select_price_drops([_drop(1, 1004, 500, 50.0)], rows, limit=5) == []
+
+
+def test_price_drops_respect_minimum_and_order():
+    rows = [make_row(id=1), make_row(id=2, title="Asus TUF"), make_row(id=3, title="Acer Nitro")]
+    drops = [_drop(1, 10000, 9500, 5.0), _drop(2, 10000, 7000, 30.0), _drop(3, 10000, 8500, 15.0)]
+
+    out = select_price_drops(drops, rows, limit=5, min_pct=10.0)
+
+    assert [round(d["drop_pct"]) for d in out] == [30, 15]
+
+
+def test_price_drop_block_absent_when_nothing_qualifies():
+    deal = {
+        "id": 1, "title": "Lenovo", "price": 5000, "url": "https://999.md/ru/1",
+        "value_score": 150.0, "vs_str": "-20%", "nbc_score": 80, "cpu": "i7", "ram": 16,
+        "ssd": 512, "brand": "LENOVO", "risk": "", "region": "Кишинёв",
+    }
+    assert "ПОДЕШЕВЕЛИ" not in "".join(build_digest([deal], [], []))
+    assert "ПОДЕШЕВЕЛИ" in "".join(build_digest([deal], [], [{
+        "title": "Asus TUF", "url": "https://999.md/ru/2",
+        "first_price": 14000, "last_price": 7000, "drop_pct": 50.0,
+    }]))
 
 
 def test_missing_year_est_does_not_crash():

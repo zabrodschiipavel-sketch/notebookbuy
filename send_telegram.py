@@ -10,7 +10,18 @@ import requests
 from rapidfuzz import fuzz
 
 # Import shared configurations and scoring
-from app_config import AI_REVIEW_TOP_N, DB_NAME, ENABLE_AI_REVIEW
+from app_config import (
+    AI_REVIEW_TOP_N,
+    DB_NAME,
+    DIGEST_MIN_DEALS,
+    DIGEST_PRICE_DROPS_N,
+    DIGEST_REGION,
+    DIGEST_REPEAT_COOLDOWN_DAYS,
+    ENABLE_AI_REVIEW,
+    MIN_CPU_SCORE,
+    PRICE_DROP_MAX_PCT,
+    PRICE_DROP_MIN_PCT,
+)
 from estimation import (
     estimate_fallback_price,
     estimate_fallback_score,
@@ -131,12 +142,17 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
         cache_data = price_cache.get(cache_key, {})
         world_price_usd = cache_data.get('current_usd')
 
+        # Both numbers below silently fall back to component arithmetic when the
+        # web lookup gave nothing. Presented unmarked they read as researched
+        # market data, so the estimate flag travels with the value to the render.
+        vs_estimated = False
         if not world_price_usd:
             # Fallback
             calc_price_mdl = estimate_fallback_price(r['cpu'], r['gpu'], r['ram'], r['ssd'], brand, components_data)
             if calc_price_mdl > 0:
                 vs_pct = ((r['price'] - calc_price_mdl) / calc_price_mdl) * 100
                 vs_str = f"{int(round(vs_pct))}%"
+                vs_estimated = True
         else:
             world_price_mdl = world_price_usd * MDL_USD_RATE
             if world_price_mdl > 0:
@@ -147,6 +163,7 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
         # AI search hallucinates values like 12% that flip to 80% a run later.
         nbc_data = nbc_cache.get(cache_key, {})
         nbc_score = plausible_nbc_score(nbc_data.get('score'))
+        nbc_estimated = not nbc_score
         if not nbc_score:
             nbc_score = estimate_fallback_score(r['cpu'], r['gpu'], r['ram'], components_data)
 
@@ -173,7 +190,9 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
                 'url': r['url'],
                 'value_score': value_score,
                 'vs_str': vs_str,
+                'vs_estimated': vs_estimated,
                 'nbc_score': nbc_score,
+                'nbc_estimated': nbc_estimated,
                 'cpu': r['cpu'],
                 'ram': r['ram'],
                 'ssd': ssd_val,
@@ -230,6 +249,61 @@ def annotate_with_history(deals: list[dict], history: dict, today: str) -> None:
             arrow = "📉" if delta < 0 else "📈"
             note += f", цена {arrow} {old_price:,} → {deal['price']:,} MDL"
         deal["seen_note"] = note
+
+
+def _days_between(earlier: str, later: str) -> int | None:
+    try:
+        fmt = "%Y-%m-%d"
+        return (datetime.strptime(later, fmt) - datetime.strptime(earlier, fmt)).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _novelty_rank(deal: dict, history: dict, today: str, cooldown_days: int) -> int:
+    """0 = never shown, 1 = price moved since last shown, 2 = due again,
+    3 = unchanged and shown recently (held back)."""
+    prev = history.get(str(deal.get("id")))
+    if not prev:
+        return 0
+
+    old_price = prev.get("price") or 0
+    if old_price and abs(deal["price"] - old_price) / old_price > 0.01:
+        return 1
+
+    age = _days_between(prev.get("last_seen", ""), today)
+    if age is None or age >= cooldown_days:
+        return 2
+    return 3
+
+
+def prioritize_by_novelty(
+    deals: list[dict],
+    history: dict,
+    today: str,
+    cooldown_days: int = DIGEST_REPEAT_COOLDOWN_DAYS,
+    min_deals: int = DIGEST_MIN_DEALS,
+) -> list[dict]:
+    """Order the digest so fresh listings come first and stale repeats drop out.
+
+    Two thirds of past digest slots went to listings the reader had already
+    seen, unchanged — one ad ran for 22 days at the same price. Repeats are
+    held back rather than deleted: if too few listings survive, the best of
+    them are added back, so the digest never ends up thinner than before.
+    """
+    ranked = sorted(
+        ((_novelty_rank(d, history, today, cooldown_days), d) for d in deals),
+        key=lambda pair: (pair[0], -pair[1].get("value_score", 0)),
+    )
+    fresh = [d for rank, d in ranked if rank < 3]
+    held = [d for rank, d in ranked if rank == 3]
+
+    need = min_deals - len(fresh)
+    if need > 0:
+        fresh += held[:need]
+        held = held[need:]
+    if held:
+        log.info("Held back %d unchanged repeat(s) from the digest", len(held))
+    return fresh
 
 
 def update_history(history: dict, sent_deals: list[dict], today: str) -> dict:
@@ -301,10 +375,25 @@ def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
     lines = [f"{idx}. {brand_emoji} <b>{title}</b>"]
     if show_region:
         lines.append(f" 📍 <b>Регион:</b> <code>{html.escape(deal['region'])}</code>")
+    # An estimate is labelled for what it is: calling a component-arithmetic
+    # guess "vs World" or "NBC Score" borrows the authority of data we do not
+    # have. ≈ marks it inline, the digest footer explains the sign once.
+    if deal.get('vs_estimated'):
+        vs_line = f" 📈 <b>Выгода:</b> <code>≈{html.escape(deal['vs_str'])} vs расчёт</code>"
+    else:
+        vs_line = f" 📈 <b>Выгода:</b> <code>{html.escape(deal['vs_str'])} vs мировая цена</code>"
+
+    if deal.get('nbc_estimated'):
+        score_line = (f" 🎯 <b>Класс:</b> <code>≈{deal['nbc_score']}%</code>"
+                      f" | <b>Value Score:</b> <code>{deal['value_score']}</code>")
+    else:
+        score_line = (f" 🎯 <b>NBC Score:</b> <code>{deal['nbc_score']}%</code>"
+                      f" | <b>Value Score:</b> <code>{deal['value_score']}</code>")
+
     lines += [
         f" 💰 <b>Цена:</b> {deal['price']:,} MDL",
-        f" 📈 <b>Выгода:</b> <code>{html.escape(deal['vs_str'])} vs World</code>",
-        f" 🎯 <b>NBC Score:</b> <code>{deal['nbc_score']}%</code> | <b>Value Score:</b> <code>{deal['value_score']}</code>",
+        vs_line,
+        score_line,
         f" 🛠 <b>Характеристики:</b> <code>{specs}</code>",
     ]
     if deal.get('risk'):
@@ -315,6 +404,103 @@ def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
         lines.append(f" {html.escape(deal['seen_note'])}")
     lines.append(f" 🔗 <a href=\"{html.escape(deal['url'], quote=True)}\">Открыть объявление</a>")
     return "\n".join(lines) + "\n\n"
+
+
+def select_price_drops(
+    drops: list[dict],
+    analyzed_rows,
+    limit: int = DIGEST_PRICE_DROPS_N,
+    min_pct: float = PRICE_DROP_MIN_PCT,
+    max_pct: float = PRICE_DROP_MAX_PCT,
+) -> list[dict]:
+    """Pick price drops worth reporting out of the scraper's raw list.
+
+    The raw list is mostly noise: sellers correcting a typo produce a "-99%"
+    drop, and spare-parts ads drop hardest of all. Only ads that made it
+    through analysis, and whose drop is within believable bounds, survive.
+    """
+    by_id = {str(r["id"]): r for r in analyzed_rows}
+    picked = []
+    for drop in drops:
+        row = by_id.get(str(drop.get("ad_id")))
+        if not row:
+            continue
+        pct = drop.get("drop_pct") or 0
+        if not (min_pct <= pct <= max_pct):
+            continue
+        title = row["title"]
+        description = row["description"] if "description" in row.keys() else ""
+        if is_unwanted_ad(title, description):
+            continue
+        if any(kw in title.lower() for kw in ("defect", "piese", "запчасти")):
+            continue
+        # Same quality bar the ranking uses, so the block cannot advertise a
+        # 500 MDL "Ноутбук" just because its price moved.
+        if (row["cpu_score"] or 0) < MIN_CPU_SCORE:
+            continue
+        picked.append({
+            "title": title,
+            "url": row["url"],
+            "first_price": int(drop["first_price"]),
+            "last_price": int(drop["last_price"]),
+            "drop_pct": pct,
+        })
+    picked.sort(key=lambda d: d["drop_pct"], reverse=True)
+    return picked[:limit]
+
+
+def format_price_drops(drops: list[dict]) -> str:
+    lines = ["\n📉 <b>ПОДЕШЕВЕЛИ</b>\n", "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"]
+    for d in drops:
+        lines.append(
+            f"• <b>{html.escape(d['title'][:60])}</b>\n"
+            f"   <code>{d['first_price']:,} → {d['last_price']:,} MDL "
+            f"(-{d['drop_pct']:.0f}%)</code>"
+            f" <a href=\"{html.escape(d['url'], quote=True)}\">открыть</a>\n"
+        )
+    return "".join(lines) + "\n"
+
+
+def estimate_footnote() -> str:
+    """Explain the ≈ sign once per digest, instead of on every line."""
+    return (
+        "\n<i>≈ — оценка по компонентам, а не найденные рыночные данные. "
+        "«Класс» — синтетический балл, не рейтинг Notebookcheck.</i>\n"
+    )
+
+
+def build_digest(
+    moldova_deals: list[dict],
+    balti_deals: list[dict],
+    price_drops: list[dict] | None = None,
+) -> list[str]:
+    """Render the digest as Telegram-ready message parts."""
+    header = "🔥 <b>ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD</b> 🔥\n"
+    header += f"📅 <i>Дата отчета: {datetime.now().strftime('%d.%m.%Y %H:%M')}</i>\n\n"
+
+    sect_moldova = "🌍 <b>ВСЯ МОЛДОВА (ТОП-5)</b>\n"
+    sect_moldova += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+    for idx, d in enumerate(moldova_deals, start=1):
+        sect_moldova += format_deal(idx, d, show_region=True)
+
+    sections = [sect_moldova]
+
+    # Rendered only when it has content — an empty city block every day is
+    # noise, not information.
+    if balti_deals:
+        sect_region = f"\n🔔 <b>{html.escape(DIGEST_REGION.upper())} (ТОП-5)</b>\n"
+        sect_region += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        for idx, d in enumerate(balti_deals, start=1):
+            sect_region += format_deal(idx, d, show_region=False)
+        sections.append(sect_region)
+
+    if price_drops:
+        sections.append(format_price_drops(price_drops))
+    if any(d.get('vs_estimated') or d.get('nbc_estimated')
+           for d in moldova_deals + balti_deals):
+        sections.append(estimate_footnote())
+
+    return split_message(header, sections)
 
 
 def main():
@@ -375,37 +561,35 @@ def main():
         log.info("All candidate deals were rejected by AI review; nothing to send.")
         return
 
+    # Novelty ordering has to happen before the top-5 cut, otherwise the slice
+    # is already full of repeats by the time history is consulted.
+    history = load_json_cache(DIGEST_HISTORY_FILE)
+    today = datetime.now().strftime("%Y-%m-%d")
+    deals = prioritize_by_novelty(deals, history, today)
+
     # 1. Moldova deals (all regions) - Top 5
     moldova_deals = deals[:5]
 
-    # 2. Balti deals - Top 5
-    balti_deals = [d for d in deals if d['region'] == "Бельцы"][:5]
+    # 2. City section - Top 5
+    balti_deals = [d for d in deals if d['region'] == DIGEST_REGION][:5]
 
     # Mark deals already shown in previous digests (and price moves since).
-    history = load_json_cache(DIGEST_HISTORY_FILE)
-    today = datetime.now().strftime("%Y-%m-%d")
     annotate_with_history(moldova_deals + balti_deals, history, today)
 
-    # Format beautiful message (Telegram HTML — robust to special chars in titles)
-    header = "🔥 <b>ТОП ВЫГОДНЫХ НОУТБУКОВ 999.MD</b> 🔥\n"
-    header += f"📅 <i>Дата отчета: {datetime.now().strftime('%d.%m.%Y %H:%M')}</i>\n\n"
+    # The scraper detects price drops on every run and used to only log them.
+    price_drops = []
+    if DIGEST_PRICE_DROPS_N:
+        try:
+            from lappars import get_price_drops
+            price_drops = select_price_drops(
+                get_price_drops(min_drop_pct=PRICE_DROP_MIN_PCT, db=DB_NAME), rows
+            )
+        except Exception as e:  # a broken drop query must not cost us the digest
+            log.warning("Could not build the price-drop block: %s", e)
+    if price_drops:
+        log.info("Price-drop block: %d listing(s)", len(price_drops))
 
-    # Moldova Section
-    sect_moldova = "🌍 <b>ВСЯ МОЛДОВА (ТОП-5)</b>\n"
-    sect_moldova += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    for idx, d in enumerate(moldova_deals, start=1):
-        sect_moldova += format_deal(idx, d, show_region=True)
-
-    # Balti Section
-    sect_balti = "\n🔔 <b>БЕЛЬЦЫ (ТОП-5)</b>\n"
-    sect_balti += "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-    if balti_deals:
-        for idx, d in enumerate(balti_deals, start=1):
-            sect_balti += format_deal(idx, d, show_region=False)
-    else:
-        sect_balti += "   <i>Выгодных предложений в Бельцах пока не найдено.</i>\n\n"
-
-    parts = split_message(header, [sect_moldova, sect_balti])
+    parts = build_digest(moldova_deals, balti_deals, price_drops)
     log.info("Sending %d message(s) to Telegram...", len(parts))
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
