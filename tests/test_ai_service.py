@@ -6,8 +6,11 @@ import retry_utils
 from ai_service import AIService
 from app_config import (
     GEMINI_MAX_RETRIES,
+    GEMINI_MODEL,
     GEMINI_REVIEW_FALLBACK_MODELS,
     GEMINI_REVIEW_MODEL,
+    GEMINI_RPM_LIMIT,
+    GEMINI_RPM_LIMIT_FULL,
 )
 
 
@@ -80,6 +83,25 @@ def test_review_prompt_keeps_the_intel_era_carve_out():
     assert "Intel MacBook Air" in prompt and "must NOT be rejected" in prompt
     assert "treat the configuration as plausible" in prompt, (
         "without the when-unsure clause the verdict starts deleting listings on a guess"
+    )
+
+
+def test_rpm_limit_follows_the_model_tier():
+    """Free tier gives flash-lite 15 RPM but full flash only 5 — throttling
+    everything at the lite figure 429s the review on its very first call."""
+    assert AIService.rpm_for("gemini-3.5-flash-lite") == GEMINI_RPM_LIMIT
+    assert AIService.rpm_for("gemini-flash-lite-latest") == GEMINI_RPM_LIMIT
+    assert AIService.rpm_for("gemini-3.6-flash") == GEMINI_RPM_LIMIT_FULL
+    assert AIService.rpm_for("gemini-flash-latest") == GEMINI_RPM_LIMIT_FULL
+    assert GEMINI_RPM_LIMIT_FULL < GEMINI_RPM_LIMIT
+
+
+def test_extraction_model_is_pinned_not_an_alias():
+    """Extraction makes tens of calls a day, so requests-per-day is what binds.
+    Flash-lite RPD ranges from 20 (2.5) to 500 (3.1/3.5) and an alias gives no
+    way to tell which tier it bills against — so this one stays pinned."""
+    assert "latest" not in GEMINI_MODEL, (
+        "an alias here can silently land on a 20/day tier and starve extraction"
     )
 
 

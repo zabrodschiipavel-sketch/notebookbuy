@@ -40,11 +40,13 @@ def _env_float(key: str, default: float) -> float:
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-# Spec extraction. Aliases are preferred over pinned versions here: a pinned
-# preview gets retired (this used to be gemini-3.1-flash-lite-preview), and on
-# this task every flash-lite generation returns identical specs in ~0.9s, so
-# there is nothing to gain from pinning one.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+# Spec extraction — the only path that makes tens of calls a day, so its
+# limiting quota is requests-per-DAY, not per-minute. Pinned deliberately:
+# free-tier RPD varies wildly inside the flash-lite family (3.1 and 3.5 get
+# 500/day, 2.5 gets 20), and an alias gives no way to know which tier it bills
+# against. A pinned model can be retired, but extraction now logs a
+# parsed/failed tally and raises a CI annotation, so that failure is loud.
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 # Model that sanity-checks the final top before it is sent. This used to
 # default to gemini-pro-latest, whose free-tier quota is 0 — so every single
@@ -95,11 +97,11 @@ GEMINI_MAX_WORKERS = max(1, _env_int("GEMINI_MAX_WORKERS", 3))
 GEMINI_REQUEST_DELAY_SEC = max(0.0, _env_float("GEMINI_REQUEST_DELAY_SEC", 0.5))
 GEMINI_SEARCH_DELAY_SEC = max(0.0, _env_float("GEMINI_SEARCH_DELAY_SEC", 1.5))
 GEMINI_MAX_RETRIES = max(1, _env_int("GEMINI_MAX_RETRIES", 3))
-# Requests per minute allowed *per model*. Gemini's free tier grants 15 RPM
-# (quota GenerateRequestsPerMinutePerProjectPerModel); without client-side
-# throttling the worker pool spends that budget in seconds and everything after
-# it returns 429. Keep a little headroom for clock skew and retries.
-GEMINI_RPM_LIMIT = max(1, _env_int("GEMINI_RPM_LIMIT", 12))
+# Requests per minute allowed *per model*, with headroom for clock skew.
+# The free tier is not one number: flash-lite gets 15 RPM, full flash only 5.
+# Throttling everything at the lite figure would 429 the review on every call.
+GEMINI_RPM_LIMIT = max(1, _env_int("GEMINI_RPM_LIMIT", 12))        # lite, limit 15
+GEMINI_RPM_LIMIT_FULL = max(1, _env_int("GEMINI_RPM_LIMIT_FULL", 4))  # full flash, limit 5
 # Longest single back-off. The digest runs once a day, so waiting out the
 # server's suggested delay is cheaper than dropping the ad.
 GEMINI_MAX_BACKOFF_SEC = max(1.0, _env_float("GEMINI_MAX_BACKOFF_SEC", 65.0))
