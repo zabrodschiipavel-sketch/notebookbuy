@@ -327,7 +327,7 @@ def update_history(history: dict, sent_deals: list[dict], today: str) -> dict:
 
 
 def apply_ai_review(deals: list[dict], reviews: dict[str, dict]) -> list[dict]:
-    """Apply Gemini Pro verdicts to the deal list.
+    """Apply AI review verdicts to the deal list.
 
     'exclude' drops the deal entirely; other verdicts attach a short note that
     format_deal renders. Deals without a review pass through unchanged, so an
@@ -404,7 +404,7 @@ def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
     if deal.get('risk'):
         lines.append(f" 🚨 <b>РИСК:</b> <code>{html.escape(deal['risk'])}</code>")
     if deal.get('ai_note'):
-        lines.append(f" 🤖 <b>Gemini:</b> <i>{html.escape(deal['ai_note'])}</i>")
+        lines.append(f" 🤖 <b>AI:</b> <i>{html.escape(deal['ai_note'])}</i>")
     if deal.get('seen_note'):
         lines.append(f" {html.escape(deal['seen_note'])}")
     lines.append(f" 🔗 <a href=\"{html.escape(deal['url'], quote=True)}\">Открыть объявление</a>")
@@ -576,7 +576,7 @@ def main():
     if len(deals) < before:
         log.info("Deduplicated re-posted listings: %d -> %d", before, len(deals))
 
-    # Second-pass review of the top candidates with Gemini Pro: drops scam
+    # Second-pass AI review of the top candidates: drops scam
     # listings and parsing garbage that the regex/score pipeline lets through.
     # The scraper detects price drops on every run and used to only log them.
     # Built before the review so those listings are screened too: a -44% drop
@@ -584,13 +584,13 @@ def main():
     price_drops = build_price_drops(rows)
 
     if ENABLE_AI_REVIEW and AI_REVIEW_TOP_N > 0:
-        # Imported lazily: pulls google-genai, needed only when review is on.
+        # Imported lazily: needed only when review is on.
         from ai_service import AIService
 
         candidates = deals[:AI_REVIEW_TOP_N]
         seen_ids = {str(c["id"]) for c in candidates}
         batch = candidates + [d for d in price_drops if str(d["id"]) not in seen_ids]
-        log.info("Reviewing %d listing(s) with Gemini...", len(batch))
+        log.info("Reviewing %d listing(s) with AI...", len(batch))
         reviews = AIService().review_deals(batch)
         if reviews:
             deals = apply_ai_review(deals, reviews)

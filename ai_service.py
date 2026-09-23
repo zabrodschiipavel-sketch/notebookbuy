@@ -1,33 +1,33 @@
-"""Gemini AI service for laptop spec extraction and grounded web search."""
+"""AI layer: spec extraction, digest review and reading search snippets.
+
+Every call goes through OpenRouter (see openrouter.py) and asks for JSON.
+"""
 import json
 import logging
 import os
-import threading
+import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from google import genai
-from google.genai import types
-
+import openrouter
 import web_search
 from app_config import (
+    AI_EXTRACT_BATCH_SIZE,
+    AI_MAX_WORKERS,
     BRAVE_RESULTS,
-    GEMINI_API_KEY,
-    GEMINI_MAX_BACKOFF_SEC,
-    GEMINI_MAX_RETRIES,
-    GEMINI_MAX_WORKERS,
-    GEMINI_MODEL,
-    GEMINI_REQUEST_DELAY_SEC,
-    GEMINI_REVIEW_FALLBACK_MODELS,
-    GEMINI_REVIEW_MODEL,
-    GEMINI_RPM_LIMIT,
-    GEMINI_RPM_LIMIT_FULL,
-    GEMINI_SEARCH_DELAY_SEC,
+    OPENROUTER_FALLBACK_MODELS,
+    OPENROUTER_MODEL,
+    OPENROUTER_REVIEW_MODEL,
 )
-from retry_utils import RateLimiter, call_with_retry
 
 
 log = logging.getLogger(__name__)
+
+ChatFn = Callable[..., tuple[Any, str]]
+
+_VERDICTS = ("exclude", "suspicious", "ok", "great")
+_LEADING_INT_RE = re.compile(r"\s*(\d+)")
 
 
 def _annotate_ci(message: str) -> None:
@@ -40,88 +40,128 @@ def _annotate_ci(message: str) -> None:
         print(f"::warning title=AI extraction degraded::{message}", flush=True)
 
 
+def model_chain(primary: str) -> list[str]:
+    """Primary first, then the configured fallbacks, without duplicates."""
+    return list(dict.fromkeys([primary, *OPENROUTER_FALLBACK_MODELS]))
+
+
+def _object(properties: dict) -> dict:
+    """Strict-mode JSON Schema object: every property required, nothing else."""
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+def _as_int(value: Any) -> int:
+    """16, "16" and "16GB" all mean 16 — only the fallback model is loose about types."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    match = _LEADING_INT_RE.match(str(value or ""))
+    return int(match.group(1)) if match else 0
+
+
+def _as_storage_gb(value: Any) -> int:
+    """Like _as_int, but "1TB" is 1024 rather than 1."""
+    size = _as_int(value)
+    return size * 1024 if isinstance(value, str) and "tb" in value.lower() else size
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return max(0.0, float(str(value).replace(",", "").lstrip("$").strip()))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _clean_specs(item: Any) -> dict | None:
+    if not isinstance(item, dict) or not str(item.get("id", "")).strip():
+        return None
+    broken = item.get("is_broken")
+    return {
+        "id": str(item["id"]).strip(),
+        "cpu": str(item.get("cpu") or "").strip(),
+        "gpu": str(item.get("gpu") or "").strip() or "integrated",
+        "ram": _as_int(item.get("ram")),
+        "ssd": _as_storage_gb(item.get("ssd")),
+        "is_broken": broken is True or str(broken).strip().lower() == "true",
+    }
+
+
 class AIService:
-    """Wraps Google Gemini for structured spec extraction and Google Search tool."""
+    """Structured spec extraction, digest review and snippet reading."""
 
-    def __init__(self):
-        self.client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-        # Gemini's RPM quota is per model, so each model gets its own budget;
-        # the extraction pass must not starve the digest review that follows it.
-        self._limiters: dict[str, RateLimiter] = {}
-        self._limiters_lock = threading.Lock()
-        self.schema = types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "cpu": types.Schema(type=types.Type.STRING),
-                "gpu": types.Schema(type=types.Type.STRING),
-                "ram": types.Schema(type=types.Type.INTEGER),
-                "ssd": types.Schema(type=types.Type.INTEGER),
-                "is_broken": types.Schema(type=types.Type.BOOLEAN),
-            },
-            required=["cpu", "gpu", "ram", "ssd", "is_broken"]
-        )
-        self.system_prompt = (
-            "Extract laptop specs accurately. cpu: full model (e.g. 'Intel Core i7-12700H'). "
-            "gpu: model or 'integrated'. ram/ssd: GB as integers. is_broken: true if parts/broken."
-        )
+    _SPECS_SCHEMA = _object({
+        "laptops": {
+            "type": "array",
+            "items": _object({
+                "id": {"type": "string"},
+                "cpu": {"type": "string"},
+                "gpu": {"type": "string"},
+                "ram": {"type": "integer"},
+                "ssd": {"type": "integer"},
+                "is_broken": {"type": "boolean"},
+            }),
+        },
+    })
 
-    @staticmethod
-    def rpm_for(model: str) -> int:
-        """Free-tier RPM differs by tier: flash-lite 15, full flash 5."""
-        return GEMINI_RPM_LIMIT if "lite" in model.lower() else GEMINI_RPM_LIMIT_FULL
+    _EXTRACT_SYSTEM_PROMPT = (
+        "Extract laptop specs from used-laptop listings. For every listing return "
+        "one entry with its id copied exactly and: cpu — full model (e.g. 'Intel "
+        "Core i7-12700H'), empty string if the listing does not say; gpu — "
+        "discrete GPU model or 'integrated'; ram and ssd — GB as integers, 0 if "
+        "not stated; is_broken — true if sold for parts, broken or locked."
+    )
 
-    def limiter_for(self, model: str) -> RateLimiter:
-        """Return the shared per-model RPM limiter, creating it on first use."""
-        with self._limiters_lock:
-            limiter = self._limiters.get(model)
-            if limiter is None:
-                limiter = RateLimiter(self.rpm_for(model), window_sec=60.0)
-                self._limiters[model] = limiter
-            return limiter
+    _REVIEW_SCHEMA = _object({
+        "reviews": {
+            "type": "array",
+            "items": _object({
+                "id": {"type": "string"},
+                "verdict": {"type": "string", "enum": list(_VERDICTS)},
+                "reason": {"type": "string"},
+            }),
+        },
+    })
+
+    _WORLD_PRICE_SCHEMA = _object({
+        "launch_usd": {"type": "number"},
+        "current_usd": {"type": "number"},
+    })
+
+    _NBC_SCHEMA = _object({
+        "score": {"type": "integer"},
+        "url": {"type": "string"},
+    })
+
+    def __init__(self, chat: ChatFn | None = None):
+        # Injectable so tests never touch the network.
+        self._chat: ChatFn = chat or openrouter.chat_json
+        self.enabled = chat is not None or openrouter.is_configured()
 
     def extract_specs(self, ads_list: list[dict]) -> list[dict]:
-        if not self.client:
-            log.warning("Skipping AI extraction because GEMINI_API_KEY is not configured")
+        """Specs for ads the regex could not parse, AI_EXTRACT_BATCH_SIZE per request.
+
+        Batching is what fits a morning run into the free tier: the binding
+        limit is requests per day, and ten ads cost the same one request as one.
+        """
+        if not self.enabled:
+            log.warning("Skipping AI extraction because OPENROUTER_API_KEY is not configured")
             return []
 
-        def process_one(ad: dict) -> dict | None:
-            try:
-                content = f"Title: {ad['title']}\nDescription: {ad['text'][:2000]}"
-
-                def _call():
-                    return self.client.models.generate_content(
-                        model=GEMINI_MODEL,
-                        contents=[content],
-                        config=types.GenerateContentConfig(
-                            system_instruction=self.system_prompt,
-                            response_mime_type="application/json",
-                            response_schema=self.schema,
-                            temperature=0.0,
-                        ),
-                    )
-
-                response = call_with_retry(
-                    _call,
-                    max_retries=GEMINI_MAX_RETRIES,
-                    base_delay_sec=GEMINI_REQUEST_DELAY_SEC or 1.0,
-                    label=f"extract_specs:{ad['id']}",
-                    max_delay_sec=GEMINI_MAX_BACKOFF_SEC,
-                    limiter=self.limiter_for(GEMINI_MODEL),
-                )
-                data = json.loads(response.text)
-                data["id"] = ad["id"]
-                return data
-            except Exception as e:
-                log.warning(f"AI failed for {ad['id']}: {e}")
-                return None
-
-        results = []
-        with ThreadPoolExecutor(max_workers=GEMINI_MAX_WORKERS) as executor:
-            futures = [executor.submit(process_one, ad) for ad in ads_list]
+        batches = [
+            ads_list[i:i + AI_EXTRACT_BATCH_SIZE]
+            for i in range(0, len(ads_list), AI_EXTRACT_BATCH_SIZE)
+        ]
+        results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=AI_MAX_WORKERS) as executor:
+            futures = [executor.submit(self._extract_batch, batch) for batch in batches]
             for future in as_completed(futures):
-                res = future.result()
-                if res:
-                    results.append(res)
+                results.extend(future.result())
 
         failed = len(ads_list) - len(results)
         # A run that silently drops most ads still exits 0, so the failure count
@@ -134,9 +174,39 @@ class AIService:
         if ads_list and failed / len(ads_list) > 0.2:
             _annotate_ci(
                 f"AI extraction dropped {failed} of {len(ads_list)} ads "
-                f"(likely Gemini rate limiting) — those ads are missing from today's ranking."
+                f"(likely OpenRouter rate limits) — those ads are missing from today's ranking."
             )
         return results
+
+    def _extract_batch(self, batch: list[dict]) -> list[dict]:
+        wanted = {str(ad["id"]) for ad in batch}
+        listings = [
+            {"id": str(ad["id"]), "title": ad["title"], "description": ad["text"][:2000]}
+            for ad in batch
+        ]
+        try:
+            data, _ = self._chat(
+                self._EXTRACT_SYSTEM_PROMPT,
+                "Listings:\n" + json.dumps(listings, ensure_ascii=False),
+                self._SPECS_SCHEMA,
+                models=model_chain(OPENROUTER_MODEL),
+                label=f"extract_specs:{len(batch)} ads",
+                max_tokens=8000,
+                reasoning_effort="low",
+            )
+        except Exception as e:
+            log.warning("AI extraction failed for a batch of %d: %s", len(batch), e)
+            return []
+
+        items = data.get("laptops", []) if isinstance(data, dict) else []
+        results: dict[str, dict] = {}
+        for item in items:
+            specs = _clean_specs(item)
+            # An id the batch never contained is a hallucination; a repeat
+            # keeps its first answer.
+            if specs and specs["id"] in wanted and specs["id"] not in results:
+                results[specs["id"]] = specs
+        return list(results.values())
 
     # Criterion (2) is carried by the caveat as much as by the rule: an
     # M-series Mac with a 128GB SSD is a parsing error, but a 2015 Intel Air
@@ -171,42 +241,14 @@ class AIService:
     def review_deals(self, deals: list[dict], model: str | None = None) -> dict[str, dict]:
         """Sanity-check the top digest deals before they are sent.
 
-        Uses full flash rather than the flash-lite model that does extraction:
-        on real listings from past digests it caught 3 of 4 planted scams
-        against flash-lite's 2, and this runs once a day on ~15 listings.
-        When the primary fails the review walks down
-        GEMINI_REVIEW_FALLBACK_MODELS. Returns {ad_id: {"verdict", "reason"}};
-        an empty dict when the client is unavailable or every model fails, so
-        callers degrade into sending the digest unreviewed.
+        One request for the whole batch; OpenRouter walks the fallback chain
+        itself if the primary is down or out of quota. Returns
+        {ad_id: {"verdict", "reason"}}; an empty dict when AI is unavailable or
+        every model fails, so callers degrade into sending the digest unreviewed.
+        An explicit *model* is used alone, without fallbacks.
         """
-        if not self.client or not deals:
+        if not self.enabled or not deals:
             return {}
-
-        models_to_try = [model or GEMINI_REVIEW_MODEL]
-        if not model:
-            models_to_try += [m for m in GEMINI_REVIEW_FALLBACK_MODELS if m not in models_to_try]
-
-        review_schema = types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "reviews": types.Schema(
-                    type=types.Type.ARRAY,
-                    items=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "id": types.Schema(type=types.Type.STRING),
-                            "verdict": types.Schema(
-                                type=types.Type.STRING,
-                                enum=["exclude", "suspicious", "ok", "great"],
-                            ),
-                            "reason": types.Schema(type=types.Type.STRING),
-                        },
-                        required=["id", "verdict", "reason"],
-                    ),
-                )
-            },
-            required=["reviews"],
-        )
 
         payload = [
             {
@@ -222,94 +264,58 @@ class AIService:
             }
             for d in deals
         ]
+        try:
+            data, served = self._chat(
+                self._REVIEW_SYSTEM_PROMPT,
+                "Review these listings:\n" + json.dumps(payload, ensure_ascii=False, indent=1),
+                self._REVIEW_SCHEMA,
+                models=[model] if model else model_chain(OPENROUTER_REVIEW_MODEL),
+                label="review_deals",
+                temperature=0.1,
+                max_tokens=8000,
+            )
+        except Exception as e:
+            log.warning("AI deal review failed, sending digest without it: %s", e)
+            return {}
 
-        for i, model_name in enumerate(models_to_try):
-            # Models with a fallback behind them get a single attempt — a dead
-            # model (free-tier pro = quota 0) or a 503 spike should not stall
-            # the chain. Only the last model retries patiently: the digest
-            # runs once a day, so waiting out a demand spike is worth it.
-            is_last = i == len(models_to_try) - 1
-            try:
-                resp = call_with_retry(
-                    lambda m=model_name: self.client.models.generate_content(
-                        model=m,
-                        contents="Review these listings:\n" + json.dumps(payload, ensure_ascii=False, indent=1),
-                        config=types.GenerateContentConfig(
-                            system_instruction=self._REVIEW_SYSTEM_PROMPT,
-                            response_mime_type="application/json",
-                            response_schema=review_schema,
-                            temperature=0.1,
-                        ),
-                    ),
-                    max_retries=GEMINI_MAX_RETRIES if is_last else 1,
-                    base_delay_sec=max(5.0, GEMINI_REQUEST_DELAY_SEC),
-                    label=f"review_deals:{model_name}",
-                    max_delay_sec=GEMINI_MAX_BACKOFF_SEC,
-                    limiter=self.limiter_for(model_name),
-                )
-                data = json.loads(resp.text)
-                log.info("Deal review done with %s", model_name)
-                return {
-                    str(r["id"]): {"verdict": r["verdict"], "reason": r["reason"]}
-                    for r in data.get("reviews", [])
-                    if r.get("id")
-                }
-            except Exception as e:
-                log.warning(f"AI deal review with {model_name} failed: {e}")
-        log.warning("All review models failed; sending digest without AI review")
-        return {}
+        log.info("Deal review done with %s", served)
+        reviews = data.get("reviews", []) if isinstance(data, dict) else []
+        out = {}
+        for r in reviews:
+            if not isinstance(r, dict) or not r.get("id"):
+                continue
+            verdict = str(r.get("verdict", "")).strip().lower()
+            # A verdict outside the enum (a fallback without schema support
+            # saying "reject") is not guessed at: the listing stays unreviewed.
+            if verdict in _VERDICTS:
+                out[str(r["id"])] = {"verdict": verdict, "reason": str(r.get("reason", ""))}
+        return out
 
-    def _extract_json(self, instruction: str, context: str, schema, label: str) -> dict[str, Any]:
-        """Read structured data out of search snippets (no grounding tool)."""
-        if not self.client:
+    def _extract_json(self, instruction: str, context: str, schema: dict, label: str) -> dict[str, Any]:
+        """Read structured data out of search snippets."""
+        if not self.enabled:
             return {}
         try:
-            resp = call_with_retry(
-                lambda: self.client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=f"{instruction}\n\nРезультаты поиска:\n{context}",
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                        temperature=0.0,
-                    ),
-                ),
-                max_retries=GEMINI_MAX_RETRIES,
-                base_delay_sec=GEMINI_SEARCH_DELAY_SEC or 1.0,
+            data, _ = self._chat(
+                instruction,
+                f"Результаты поиска:\n{context}",
+                schema,
+                models=model_chain(OPENROUTER_MODEL),
                 label=label,
-                max_delay_sec=GEMINI_MAX_BACKOFF_SEC,
-                limiter=self.limiter_for(GEMINI_MODEL),
+                max_tokens=2000,
+                reasoning_effort="low",
             )
-            data = json.loads(resp.text)
-            return data if isinstance(data, dict) else {}
         except Exception as e:
             log.warning("%s failed: %s", label, e)
             return {}
-
-    _WORLD_PRICE_SCHEMA = types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "launch_usd": types.Schema(type=types.Type.NUMBER),
-            "current_usd": types.Schema(type=types.Type.NUMBER),
-        },
-        required=["launch_usd", "current_usd"],
-    )
-
-    _NBC_SCHEMA = types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "score": types.Schema(type=types.Type.INTEGER),
-            "url": types.Schema(type=types.Type.STRING),
-        },
-        required=["score", "url"],
-    )
+        return data if isinstance(data, dict) else {}
 
     def lookup_world_price(self, title: str, cpu: str, gpu: str) -> dict[str, Any]:
         """Launch and current USD price, read out of real search results."""
         results = web_search.search(f"{title} {cpu} laptop price USD", count=BRAVE_RESULTS)
         if not results:
             return {}
-        return self._extract_json(
+        data = self._extract_json(
             "Из результатов поиска определи цены НОВОГО ноутбука в долларах США: "
             "launch_usd — цена на старте продаж, current_usd — актуальная розничная. "
             "Бери только цены самого ноутбука, не аксессуаров и не б/у. "
@@ -318,6 +324,12 @@ class AIService:
             self._WORLD_PRICE_SCHEMA,
             f"world_price:{title[:30]}",
         )
+        # The digest multiplies these by an exchange rate; "899" from a model
+        # that ignored the schema must not reach it as a string.
+        prices = {key: _as_float(data.get(key)) for key in ("launch_usd", "current_usd")}
+        # All zeros is the model saying "not found". Returned as data it was
+        # cached as a hit forever; empty, it becomes a miss that expires.
+        return prices if any(prices.values()) else {}
 
     def lookup_nbc_score(self, title: str, cpu: str, gpu: str) -> dict[str, Any]:
         """Notebookcheck verdict for the model, read out of real search results."""
@@ -326,7 +338,7 @@ class AIService:
         )
         if not results:
             return {}
-        return self._extract_json(
+        data = self._extract_json(
             "Найди в результатах итоговую оценку Notebookcheck для этого ноутбука "
             "в процентах и ссылку на обзор. Оценка Notebookcheck обычно 50–95%. "
             "Если оценки нет — верни score 0 и пустой url. Не выдумывай число.",
@@ -334,4 +346,6 @@ class AIService:
             self._NBC_SCHEMA,
             f"nbc_score:{title[:30]}",
         )
+        # Score 0 means "no rating found" — a miss, not a rating (see above).
+        return data if _as_int(data.get("score")) else {}
 

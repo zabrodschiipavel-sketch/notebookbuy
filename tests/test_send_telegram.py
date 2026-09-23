@@ -377,7 +377,7 @@ def test_format_deal_renders_ai_note():
         "ai_note": "⚠️ проверьте, продаётся ли сам ноутбук",
     }
     text = format_deal(1, deal)
-    assert "Gemini:" in text
+    assert "AI:" in text
     assert "проверьте, продаётся ли сам ноутбук" in text
 
 

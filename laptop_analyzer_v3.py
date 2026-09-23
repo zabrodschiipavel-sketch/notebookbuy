@@ -15,13 +15,13 @@ import web_search
 from ai_service import AIService
 from app_config import (
     ADS_ANALYZE_LIMIT,
+    AI_MAX_WORKERS,
+    AI_SEARCH_DELAY_SEC,
     DB_NAME,
     ENABLE_EXTERNAL_LOOKUPS,
     EXTERNAL_MISS_TTL_DAYS,
-    GEMINI_API_KEY,
-    GEMINI_MAX_WORKERS,
-    GEMINI_SEARCH_DELAY_SEC,
     MIN_CPU_SCORE,
+    OPENROUTER_API_KEY,
     WORLD_PRICE_TOP_N,
 )
 from benchmarks import HardwareBenchmarker
@@ -76,8 +76,8 @@ def _is_fresh_cache_entry(entry: object) -> bool:
         return False
     return (datetime.date.today() - recorded).days < EXTERNAL_MISS_TTL_DAYS
 
-if not GEMINI_API_KEY:
-    logging.warning("GEMINI_API_KEY is not set — AI extraction and external lookups will be skipped")
+if not OPENROUTER_API_KEY:
+    logging.warning("OPENROUTER_API_KEY is not set — AI extraction and external lookups will be skipped")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -147,7 +147,7 @@ class LaptopAnalyzer:
                 "skipped and every such figure in the digest will be a component estimate"
             )
 
-        if ENABLE_EXTERNAL_LOOKUPS and self.ai.client and web_search.is_configured():
+        if ENABLE_EXTERNAL_LOOKUPS and self.ai.enabled and web_search.is_configured():
             price_cache = self._load_json_cache(WORLD_PRICE_CACHE)
             nbc_cache = self._load_json_cache(NBC_CACHE_FILE)
 
@@ -171,7 +171,7 @@ class LaptopAnalyzer:
                     # same dead question and spends the quota again.
                     cache[key] = data if data else _miss_entry()
                     dirty = True
-                    time.sleep(GEMINI_SEARCH_DELAY_SEC)  # Minimal delay between searches
+                    time.sleep(AI_SEARCH_DELAY_SEC)  # Minimal delay between searches
                     return data
 
                 p_data = lookup(
@@ -185,7 +185,7 @@ class LaptopAnalyzer:
 
                 return lap['id'], p_data, r_data
 
-            with ThreadPoolExecutor(max_workers=min(3, GEMINI_MAX_WORKERS)) as executor:
+            with ThreadPoolExecutor(max_workers=min(3, AI_MAX_WORKERS)) as executor:
                 futures = [executor.submit(process_laptop_external, lap) for lap in processed_laptops[:WORLD_PRICE_TOP_N]]
                 for future in as_completed(futures):
                     l_id, p_val, r_val = future.result()

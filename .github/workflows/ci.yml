@@ -12,6 +12,14 @@ on:
     - cron: '0 5 * * 1'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# A new push to the same branch makes the running check obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest

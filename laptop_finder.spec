@@ -13,10 +13,7 @@ hidden = (
     collect_submodules('streamlit')
     + collect_submodules('plotly')
     + collect_submodules('bs4')
-    + collect_submodules('google.genai')
-    + collect_submodules('google.auth')
-    + collect_submodules('google.protobuf')
-    + collect_submodules('pydantic')
+    + collect_submodules('google.protobuf')   # protobuf нужен Streamlit
     + collect_submodules('anyio')
     + collect_submodules('starlette')
     + collect_submodules('uvicorn')
@@ -55,6 +52,9 @@ hidden = (
         'benchmarks',
         'ai_service',
         'currency',
+        'estimation',
+        'openrouter',
+        'web_search',
         'requests',
         'pkg_resources.py2_compat',
         'cryptography',
@@ -78,8 +78,6 @@ metadata = (
     + copy_metadata('plotly')
     + copy_metadata('pyarrow')
     + copy_metadata('narwhals')
-    + copy_metadata('pydantic')
-    + copy_metadata('google-genai')           # google.genai — pip show google-genai
     + copy_metadata('anyio')
     + copy_metadata('starlette')
     + copy_metadata('uvicorn')
@@ -110,6 +108,12 @@ datas = (
         ('benchmarks.py',         '.'),
         ('ai_service.py',         '.'),
         ('currency.py',           '.'),
+        # Дашборд импортирует estimation, а он читает components_db.json —
+        # без них .exe падал на старте с ModuleNotFoundError.
+        ('estimation.py',         '.'),
+        ('openrouter.py',         '.'),
+        ('web_search.py',         '.'),
+        ('components_db.json',    '.'),
         ('query_999.graphql',     '.'),
         ('passmark_cpu.json',     '.'),
         ('passmark_gpu.json',     '.'),

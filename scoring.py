@@ -8,7 +8,11 @@ import datetime
 import re
 
 
-ANALYSIS_VERSION = "2026-06-11.1" # Parser fixes: RAM vs SSD sizes, M-chip title guard, warranty years, G7 CPU suffixes
+# Bumped when parsing or benchmark matching changes, so cached analyses are
+# redone. 2026-09-23: 12th/13th-gen Intel U/P chips were dated 2009, and
+# vendor-prefixed GPUs from AI extraction ("NVIDIA GeForce RTX 3050") matched
+# the wrong Passmark entry — cached years and scores are both wrong.
+ANALYSIS_VERSION = "2026-09-23.1"
 
 
 MIN_PRICE_MDL = 500
@@ -106,10 +110,14 @@ def estimate_year_from_cpu(cpu_name: str) -> int | None:
         gen = None
         if len(model_num) == 5: # e.g., 12700H -> 12th gen
             gen = int(model_num[:2])
-        elif len(model_num) == 4: # e.g., 8550U -> 8th gen, 10210U -> 10th gen
-            if model_num.startswith(('10', '11')): # 10th and 11th gen use 2-digit prefix
+        elif len(model_num) == 4: # e.g., 8550U -> 8th gen, 1235U -> 12th gen
+            # A leading 1 is always a two-digit generation (1035G1, 1135G7,
+            # 1235U, 1355U): first-gen mobile Core i models had three digits
+            # (i5-520M). Checking only 10/11 dated every 12th/13th-gen U and P
+            # chip to 2009, and MIN_YEAR then dropped them from the ranking.
+            if model_num.startswith('1'):
                 gen = int(model_num[:2])
-            else: # Older gens use 1-digit prefix
+            else: # 2nd-9th gen use a 1-digit prefix
                 gen = int(model_num[0])
         if gen and gen in intel_gen_years:
             return intel_gen_years[gen]

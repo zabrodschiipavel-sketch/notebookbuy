@@ -226,3 +226,10 @@ def test_slitted_and_standalone_ssd():
     # 256gb standalone
     res3 = LaptopParser.regex_parse("8gb ram 256gb", "Dell Inspiron")
     assert res3["ssd"] == 256
+
+
+def test_modern_u_series_keeps_the_year_the_ad_states():
+    """The text-year cross-check trusts the CPU generation; with 1235U dated
+    2009 it overwrote an honest "2023" and the ad fell below MIN_YEAR."""
+    res = LaptopParser.regex_parse("ноутбук 2023 года", "Lenovo IdeaPad i5-1235U 8gb")
+    assert res["year_est"] == 2023

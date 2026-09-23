@@ -15,7 +15,6 @@ classifiers = [
 
 dependencies = [
     "beautifulsoup4>=4.12,<5",
-    "google-genai>=1.0,<2",
     "pandas>=2.0,<3",
     "plotly>=6.0,<7",
     "python-dotenv>=1.0,<2",
@@ -78,8 +77,11 @@ py-modules = [
     "laptop_analyzer_v3",
     "laptop_dashboard",
     "launcher",
+    "openrouter",
     "parser",
     "retry_utils",
     "scoring",
+    "send_telegram",
+    "web_search",
 ]
 

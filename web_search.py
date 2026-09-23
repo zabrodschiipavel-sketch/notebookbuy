@@ -1,9 +1,9 @@
 """Brave Search client.
 
-Grounds world-price and review lookups in real search results. Gemini's own
-`google_search` tool draws on the same per-model quota as spec extraction and
-returns an answer with no visible sources; Brave has a separate budget and
-hands back snippets that a model can be asked to read rather than recall.
+Grounds world-price and review lookups in real search results. A model asked
+to recall a price answers with no visible sources (and invented Notebookcheck
+ratings like 12%); Brave hands back snippets that a model can be asked to read
+rather than recall, on a budget separate from the AI quota.
 """
 import html
 import json

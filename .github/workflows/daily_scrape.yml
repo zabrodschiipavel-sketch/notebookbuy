@@ -6,9 +6,23 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch: # Позволяет запускать вручную из интерфейса GitHub
 
+# Токену нужно только чтение репозитория; кэш и артефакты ходят через
+# собственный токен раннера.
+permissions:
+  contents: read
+
+# Ручной запуск поверх cron-запуска гонял бы два конвейера над одной БД:
+# побеждал бы последний сохранённый кэш, а дайджест уходил бы дважды.
+concurrency:
+  group: daily-scrape
+  cancel-in-progress: false
+
 jobs:
   scrape-and-analyze:
     runs-on: ubuntu-latest
+    # Бесплатные модели стоят в очереди; зависший запуск не должен жечь
+    # минуты Actions до шестичасового лимита.
+    timeout-minutes: 60
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -41,10 +55,17 @@ jobs:
 
       # Запуск сбора объявлений по всей Молдове
       - name: Run Scraper (All Moldova)
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python lappars.py --once --region all
+
+      # Состав бесплатных моделей OpenRouter меняется каждый месяц. Если
+      # настроенная модель пропала из каталога, запросы молча уходят на
+      # fallback — эта проверка поднимает предупреждение на запуске.
+      # Каталог публичный: ключ не нужен, квоту не тратит.
+      - name: Check OpenRouter models
+        continue-on-error: true
+        run: |
+          python openrouter.py
 
       # Запуск анализатора и генерации отчетов
       # BRAVE_API_KEY нужен для поиска реальных мировых цен и оценок
@@ -52,19 +73,19 @@ jobs:
       # (дайджест помечает такие значения знаком ≈).
       - name: Run Analyzer
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
         run: |
           python laptop_analyzer_v3.py
 
       # Отправляем сводку лучших сделок в Telegram
-      # (GEMINI_API_KEY нужен для финального ревью топа через Gemini Pro;
+      # (OPENROUTER_API_KEY нужен для финального AI-ревью топа;
       # скрипт также пишет digest_history.json для пометок «уже в топе»)
       - name: Send Telegram Notification
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           python send_telegram.py
 

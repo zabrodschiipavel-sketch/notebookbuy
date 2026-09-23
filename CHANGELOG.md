@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **AI moved from Gemini to OpenRouter** (`openrouter.py`, `OPENROUTER_API_KEY`;
+  the `google-genai` dependency is gone). Primary model:
+  `nvidia/nemotron-3-super-120b-a12b:free` — free and enforcing structured
+  outputs; Nemotron 3 Ultra ranks higher on the free charts but ignores
+  `response_format`, and every call here asks for JSON. Fallback:
+  `meta/muse-spark-1.3-contributor`, sent as OpenRouter's server-side `models`
+  chain so a rate-limited or vanished primary costs no extra round trip. The
+  fallback is not a `:free` variant — it bills cents a month at this volume and
+  needs a positive balance. `GEMINI_*` settings are replaced by
+  `OPENROUTER_MODEL` / `OPENROUTER_FALLBACK_MODELS` / `OPENROUTER_REVIEW_MODEL`
+  and neutral `AI_*` tunables; the GitHub secret is now `OPENROUTER_API_KEY`.
+- Spec extraction is batched, ten ads per request (`AI_EXTRACT_BATCH_SIZE`).
+  OpenRouter's free models allow 50 requests a day (1000 after $10 of
+  credits); one request per ad would have spent the whole allowance on a
+  typical morning's ~60 unparsed ads before the lookups and review ran.
+- Answers are validated rather than trusted: the schema is also spelled out in
+  the prompt, fenced or prose-wrapped JSON is unwrapped, ids the batch never
+  contained are dropped, `"16GB"` becomes 16, and a review verdict outside the
+  enum leaves the listing unreviewed instead of guessing. The fallback model
+  may not enforce the schema, and the review verdict deletes listings.
+- Retries skip errors a retry cannot fix (400/401/402/403/404) and honour the
+  `Retry-After` header; 402 and data-policy 404s name the account setting to
+  change.
+- Workflows declare `permissions: contents: read`; the daily run gets a
+  concurrency group (a manual run on top of the cron run would race over one
+  database and send the digest twice) and a 60-minute timeout. The scraper
+  step no longer receives an AI key it never used.
+
+### Added
+
+- `python openrouter.py` lists the free OpenRouter models that currently
+  support structured outputs and flags any configured model that has left the
+  catalog. The free roster changes month to month and a vanished primary fails
+  silently into the fallback; the daily workflow now runs the check and raises
+  a warning annotation on the run.
+
+### Fixed
+
+- Every 12th- and 13th-gen Intel U/P laptop was dated 2009 and dropped from the
+  ranking. The year table read a 4-digit model's generation from two digits
+  only for `10xx`/`11xx`, so `i5-1235U`, `i7-1255U`, `i5-1240P`, `i7-1355U` —
+  a large share of current office machines — came out as first generation:
+  the analyzer dropped them under `MIN_YEAR` (2014), and the digest scored them
+  with the 95% age penalty, far below its cut-off. An ad stating "2023"
+  did not help: the text-year cross-check trusted the CPU and overwrote it.
+- AI-extracted GPUs matched the wrong Passmark entry. The model writes
+  "NVIDIA GeForce RTX 3050"; Passmark lists "GeForce RTX 3050 …", so the vendor
+  word sank the subset match and the fuzzy pass settled on "GeForce 205" —
+  126 points for a ~10 000-point card, and an RTX 4060 scored as a 2060. Every
+  gaming laptop the regex could not parse lost roughly a quarter of its tech
+  points. The lookup now retries without vendor words when a model number
+  remains. `ANALYSIS_VERSION` is bumped for both fixes so cached years and
+  scores are redone (a one-off re-extraction of roughly 10–20 batched requests).
+- A world-price or Notebookcheck lookup that found nothing was cached as a hit
+  forever. The model answered "not found" with zeros, the zeros made a
+  non-empty dict, and the analyzer stored it as data — so the
+  `EXTERNAL_MISS_TTL_DAYS` retry never applied to exactly the lookups it was
+  written for. An all-zero answer is now a miss.
+- The PyInstaller build omitted `estimation.py`, `web_search.py` and
+  `components_db.json`. The dashboard imports `estimation`, so the .exe died on
+  start with `ModuleNotFoundError`; the spec now bundles them and no longer
+  copies metadata for `pydantic`, which only `google-genai` pulled in.
+- `pyproject.toml` did not list `estimation`, `web_search` or `send_telegram`
+  as modules, so a non-editable `pip install .` shipped a package that could
+  not import its own dashboard.
+
+### Removed
+
+- `AIService.rpm_for` / `limiter_for` and the per-tier Gemini RPM settings;
+  OpenRouter's free-model cap is per account, so one process-wide limiter
+  covers it.
+
 ### Added
 
 - Brave Search grounds the world-price and Notebookcheck lookups (`web_search.py`,
