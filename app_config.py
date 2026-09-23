@@ -122,7 +122,19 @@ BRAVE_RESULTS = max(1, _env_int("BRAVE_RESULTS", 5))
 EXTERNAL_MISS_TTL_DAYS = max(1, _env_int("EXTERNAL_MISS_TTL_DAYS", 7))
 
 MIN_CPU_SCORE = _env_int("MIN_CPU_SCORE", DEFAULT_MIN_CPU_SCORE)
-ADS_ANALYZE_LIMIT = max(1, _env_int("ADS_ANALYZE_LIMIT", 500))
+
+# The scrape pages through the whole category. It used to be one 500-ad request,
+# and every listing past it dropped out of the ranking and price tracking.
+SCRAPE_PAGE_SIZE = max(10, _env_int("SCRAPE_PAGE_SIZE", 200))
+SCRAPE_MAX_ADS = max(1, _env_int("SCRAPE_MAX_ADS", 3000))
+SCRAPE_PAGE_DELAY_SEC = max(0.0, _env_float("SCRAPE_PAGE_DELAY_SEC", 1.5))
+# Regex parsing is cheap, so the analyzer looks at everything scraped.
+ADS_ANALYZE_LIMIT = max(1, _env_int("ADS_ANALYZE_LIMIT", SCRAPE_MAX_ADS))
+# AI extraction is not: it draws on the free model's daily request quota,
+# which the price lookups and the digest review share. Ads over this cap wait
+# for the next run (newest first), so a big backlog clears over a few days
+# instead of starving the review.
+AI_EXTRACT_MAX_ADS = max(0, _env_int("AI_EXTRACT_MAX_ADS", 200))
 
 PASSMARK_CACHE_DAYS = max(1, _env_int("PASSMARK_CACHE_DAYS", 7))
 WORLD_PRICE_TOP_N = max(0, _env_int("WORLD_PRICE_TOP_N", 10))

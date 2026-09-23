@@ -11,6 +11,7 @@ import streamlit as st
 from bs4 import BeautifulSoup
 
 from app_config import DB_NAME
+from currency import usd_to_mdl
 from db import init_database
 from estimation import (
     estimate_fallback_price,
@@ -20,8 +21,8 @@ from estimation import (
 )
 from scoring import (
     MAX_PRICE_MDL,
-    MDL_USD_RATE,  # Import MDL_USD_RATE from scoring
     MIN_PRICE_MDL,
+    apple_chip,
     classify_laptop,
     is_unwanted_ad,
     score_laptop,
@@ -222,7 +223,7 @@ def extract_cpu_brand(cpu: str) -> str:
     cpu_lower = str(cpu).lower()
     if "ryzen" in cpu_lower or "amd" in cpu_lower or "athlon" in cpu_lower:
         return "AMD"
-    elif "m1" in cpu_lower or "m2" in cpu_lower or "m3" in cpu_lower or "m4" in cpu_lower or "apple" in cpu_lower:
+    elif apple_chip(cpu_lower) or "apple" in cpu_lower:
         return "Apple"
     elif any(k in cpu_lower for k in ("i3", "i5", "i7", "i9", "intel", "celeron", "pentium", "xeon")):
         return "Intel"
@@ -468,7 +469,7 @@ def get_external_info(row):
 
     vs_pct = "—"
     if wp.get('current_usd'):
-        world_mdl = wp['current_usd'] * MDL_USD_RATE # Use MDL_USD_RATE
+        world_mdl = wp['current_usd'] * usd_to_mdl()
         diff = (row['price'] - world_mdl) / world_mdl * 100
         vs_pct = f"{diff:+.0f}%"
 

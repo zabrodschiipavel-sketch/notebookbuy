@@ -53,7 +53,18 @@ ruff check . --fix
 pytest -v
 ```
 
-All tests must pass before submitting a pull request.
+All tests must pass before submitting a pull request. No test touches the
+network: exchange rates are pinned in `tests/conftest.py`, and every HTTP client
+is exercised through a fake transport.
+
+## Dependencies
+
+The daily workflow installs `requirements-lock.txt`. After changing
+dependencies in `pyproject.toml`, regenerate it:
+
+```bash
+uv pip compile pyproject.toml --universal --python-version 3.10 -o requirements-lock.txt
+```
 
 ## Submitting Changes
 

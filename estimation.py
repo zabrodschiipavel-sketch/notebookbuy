@@ -9,7 +9,8 @@ the same laptop.
 import json
 import logging
 
-from scoring import MDL_USD_RATE
+from currency import usd_to_mdl
+from scoring import apple_chip
 
 
 log = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ def _tier_for(name: str, tiers: dict, default: dict) -> dict:
 def _is_apple(cpu: str, brand: str | None) -> bool:
     if brand and str(brand).lower() == "apple":
         return True
-    return any(chip in str(cpu or "").lower() for chip in ("m1", "m2", "m3", "m4"))
+    return apple_chip(cpu) is not None
 
 
 def estimate_fallback_price(
@@ -109,7 +110,7 @@ def estimate_fallback_price(
         + ram_gb * 4
         + (ssd_gb / 128) * 10
     )
-    return int(total_usd * MDL_USD_RATE)
+    return int(total_usd * usd_to_mdl())
 
 
 def estimate_fallback_score(

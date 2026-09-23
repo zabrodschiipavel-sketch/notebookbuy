@@ -18,6 +18,8 @@ import logging
 import os
 import re
 import sys
+import threading
+from collections import Counter
 from typing import Any
 
 import requests
@@ -48,6 +50,17 @@ _limiter = RateLimiter(AI_RPM_LIMIT, window_sec=60.0)
 # A retry cannot fix these: malformed request, bad key, empty balance,
 # moderation refusal, no endpoint for the model or the account's data policy.
 _PERMANENT_STATUSES = frozenset({400, 401, 402, 403, 404})
+
+# Per-process tally for the run summary: requests, answers that came from a
+# fallback model, and requests that failed after retries.
+usage: Counter[str] = Counter()
+_usage_lock = threading.Lock()
+
+
+def _count(key: str) -> None:
+    with _usage_lock:
+        usage[key] += 1
+
 
 _FENCE_RE = re.compile(r"^```[a-z]*\s*|\s*```$", re.IGNORECASE)
 
@@ -213,15 +226,21 @@ def chat_json(
             # Sampling can fix a malformed answer, so this one is retryable.
             raise OpenRouterError(f"unparseable answer from {served}: {exc}") from exc
 
-    data, served = call_with_retry(
-        attempt,
-        max_retries=max_retries,
-        base_delay_sec=AI_RETRY_DELAY_SEC,
-        label=label,
-        max_delay_sec=AI_MAX_BACKOFF_SEC,
-        limiter=_limiter,
-    )
+    _count("requests")
+    try:
+        data, served = call_with_retry(
+            attempt,
+            max_retries=max_retries,
+            base_delay_sec=AI_RETRY_DELAY_SEC,
+            label=label,
+            max_delay_sec=AI_MAX_BACKOFF_SEC,
+            limiter=_limiter,
+        )
+    except Exception:
+        _count("failed")
+        raise
     if not same_model(served, models[0]):
+        _count("fallback")
         log.warning("%s: %s unavailable, answered by fallback %s", label, models[0], served)
     return data, served
 

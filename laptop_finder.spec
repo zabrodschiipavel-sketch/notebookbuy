@@ -54,6 +54,7 @@ hidden = (
         'currency',
         'estimation',
         'openrouter',
+        'run_summary',
         'web_search',
         'requests',
         'pkg_resources.py2_compat',
@@ -112,6 +113,7 @@ datas = (
         # без них .exe падал на старте с ModuleNotFoundError.
         ('estimation.py',         '.'),
         ('openrouter.py',         '.'),
+        ('run_summary.py',        '.'),
         ('web_search.py',         '.'),
         ('components_db.json',    '.'),
         ('query_999.graphql',     '.'),

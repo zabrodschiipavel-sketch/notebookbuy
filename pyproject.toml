@@ -80,8 +80,10 @@ py-modules = [
     "openrouter",
     "parser",
     "retry_utils",
+    "run_summary",
     "scoring",
     "send_telegram",
+    "state_snapshot",
     "web_search",
 ]
 

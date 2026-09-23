@@ -62,3 +62,22 @@ def test_score_ram_bonus():
 
 def test_score_zero_without_components():
     assert estimate_fallback_score("i7", "rtx 4070", 8, components={}) == 0
+
+
+def test_shipped_tiers_cover_current_hardware():
+    """A part missing from components_db.json falls to the default tier: every
+    i9 used to get CPU score 2 and an RTX 3060 counted as no GPU at all."""
+    from estimation import (
+        _DEFAULT_CPU_TIER,
+        _DEFAULT_GPU_TIER,
+        _tier_for,
+        load_components_db,
+    )
+
+    db = load_components_db()
+    for cpu in ("i9-13980hx", "m4", "ryzen ai 9 hx 370", "core ultra 5 125h", "ryzen 3 7320u"):
+        assert _tier_for(cpu, db["cpu_tiers"], _DEFAULT_CPU_TIER) is not _DEFAULT_CPU_TIER, cpu
+    for gpu in ("rtx 3060", "rtx 5070", "rtx 2060", "gtx 1660 ti"):
+        assert _tier_for(gpu, db["gpu_tiers"], _DEFAULT_GPU_TIER) is not _DEFAULT_GPU_TIER, gpu
+    # Longest keyword wins: a 5070 Ti is not priced as a plain 5070.
+    assert _tier_for("rtx 5070 ti", db["gpu_tiers"], _DEFAULT_GPU_TIER) == db["gpu_tiers"]["rtx 5070 ti"]

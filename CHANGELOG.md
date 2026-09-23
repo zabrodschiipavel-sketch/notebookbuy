@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The scrape pages through the whole category** (`SCRAPE_PAGE_SIZE`,
+  `SCRAPE_MAX_ADS`, default 3000). It was one 500-ad request, and the analyzer
+  only ranks ads the latest scrape touched, so every listing past the first
+  page dropped out of the ranking and out of price tracking. Pages are retried,
+  deduplicated (the listing shifts while it is paged), and a failure after the
+  first page keeps what was already fetched.
+- **State is published to the `pipeline-data` branch** (`state_snapshot.py`)
+  after every successful scrape, and restored from there when the Actions cache
+  misses. The cache is evicted after 7 days without access, which would have
+  wiped the price and digest history without an error. The snapshot is a single
+  force-pushed commit, so the repository does not grow, and a database that
+  shrank below half of the previous snapshot is refused rather than published.
+- Run summary (`run_summary.py`): each step writes its numbers — ads fetched,
+  sent to the AI, answered by the fallback model, messages delivered — to the
+  Actions run page.
+- `requirements-lock.txt` pins the daily workflow's dependencies; a fresh
+  release of any of them can no longer break the morning digest. The weekly CI
+  run keeps installing unpinned versions to catch drift.
+- `AI_EXTRACT_MAX_ADS` (200): with the full category scraped, the first run
+  would otherwise spend the whole free daily quota on extraction before the
+  review. Ads over the cap wait for the next run, newest first.
+- Tests for `LaptopAnalyzer.run()` end to end, which had none.
+
+### Changed
+
+- **Failures now fail the run.** `lappars.py --once` exits 1 when nothing was
+  fetched — the analyzer and the digest used to carry on over yesterday's data.
+  `send_telegram.py` exits 1 when the digest should have gone out and did not,
+  retries Telegram 429s after `retry_after` and 5xx after a pause, and no longer
+  records an undelivered digest as shown.
+- World-price comparisons use the live USD rate. `scoring.MDL_USD_RATE`
+  (a hardcoded 18.0) is gone; listing prices were already converted at the live
+  rate, so the two sides of "vs мировая цена" used different exchange rates.
+  `currency.py` no longer fires a network request on import.
+- The digest applies the analyzer's quality bar (`scoring.is_rankable`: CPU
+  score and `MIN_YEAR`). It scores listings on its own and skipped both checks.
+- Apple M-chip detection is one helper (`scoring.apple_chip`) instead of five
+  copies of `("m1", "m2", "m3", "m4")`.
+
+### Fixed
+
+- Current hardware was not recognised, so those ads went to the AI (spending
+  its quota) or were misdated: Apple M5, Ryzen AI 300 and AI Max, Ryzen 200
+  (3-digit), Intel Core 5/7 without the "i", and Core Ultra series 2/3 (dated
+  2024). The text-year regex stopped at 2025 and now runs to the current year.
+- "SSD M2" hid the real CPU: the first CPU-looking match was the M.2 slot, the
+  Apple guard cleared it, and the i5 after it was never looked at.
+- `components_db.json` had no `i9` (every i9 got the default CPU score of 2)
+  and no RTX 3060/2060/50-series; added, with current Apple, Ryzen AI and
+  Core Ultra tiers.
+- `.gitignore` used trailing comments, which gitignore does not support: the
+  `!laptop_finder.spec` exception never matched.
+
 ### Changed
 
 - **AI moved from Gemini to OpenRouter** (`openrouter.py`, `OPENROUTER_API_KEY`;

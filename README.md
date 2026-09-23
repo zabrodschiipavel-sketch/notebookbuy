@@ -72,6 +72,9 @@ notebookbuy/
 ├── db.py                   # SQLite schema, migrations, context manager
 ├── app_config.py           # Env-based runtime configuration
 ├── retry_utils.py          # Rate limiter + retry that honours server back-off
+├── run_summary.py          # Per-step table on the GitHub Actions run page
+├── state_snapshot.py       # Pack/restore DB + caches to the pipeline-data branch
+├── requirements-lock.txt   # Pinned deps for the daily workflow
 ├── launcher.py             # PyInstaller .exe entry point
 ├── query_999.graphql       # GraphQL query for 999.md ads
 ├── pyproject.toml          # Project metadata, dependencies, ruff, pytest
@@ -88,6 +91,8 @@ notebookbuy/
 │   ├── test_web_search.py      # Brave client (fake transport, no network)
 │   ├── test_retry_utils.py     # Rate limiter & back-off
 │   ├── test_analyzer_cache.py  # External-lookup cache markers
+│   ├── test_analyzer_pipeline.py # LaptopAnalyzer.run() end to end
+│   ├── test_state_snapshot.py  # State pack/restore and its guards
 │   ├── test_currency.py        # Exchange rate fallback
 │   └── test_db.py              # Schema creation & migration
 └── .github/
@@ -165,7 +170,8 @@ Brave allows **1 req/s and 2000/month**, far more than a daily run needs. See
 ### 3. Run
 
 ```bash
-# Fetch latest ads (--region all covers Moldova; default is balti)
+# Fetch latest ads (--region all covers Moldova; default is balti).
+# Pages through the category up to SCRAPE_MAX_ADS (3000).
 python lappars.py --once --region all
 
 # Analyze & score
@@ -183,8 +189,20 @@ streamlit run laptop_dashboard.py
 ## 📬 The Daily Digest
 
 `.github/workflows/daily_scrape.yml` runs the pipeline at 06:00 UTC and posts a
-shortlist to Telegram. The database and lookup caches persist between runs through the
-Actions cache.
+shortlist to Telegram.
+
+- **State survives a quiet week.** The database and lookup caches live in the Actions
+  cache, which GitHub evicts after 7 days without access. After each successful scrape
+  `state_snapshot.py` also publishes them to the `pipeline-data` branch (one commit,
+  overwritten daily), and a run that misses the cache restores from there. It refuses to
+  publish a database that shrank below half of the previous snapshot — that is a broken
+  restore, and it must not overwrite the only good copy.
+- **Failures fail the run.** A scrape that fetched nothing, or a digest that was not
+  delivered, exits non-zero instead of carrying on over yesterday's data or staying green
+  through a week of silence. Each step writes its numbers (ads fetched, sent to AI,
+  answered by the fallback model, messages delivered) to the run's summary page.
+- **Pinned dependencies.** The daily job installs `requirements-lock.txt`; the weekly CI
+  run installs unpinned versions, so drift shows up there first.
 
 What the digest does beyond ranking by score:
 

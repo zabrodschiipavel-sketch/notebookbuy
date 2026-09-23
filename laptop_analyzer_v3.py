@@ -11,10 +11,13 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
+import openrouter
+import run_summary
 import web_search
 from ai_service import AIService
 from app_config import (
     ADS_ANALYZE_LIMIT,
+    AI_EXTRACT_MAX_ADS,
     AI_MAX_WORKERS,
     AI_SEARCH_DELAY_SEC,
     DB_NAME,
@@ -25,6 +28,7 @@ from app_config import (
     WORLD_PRICE_TOP_N,
 )
 from benchmarks import HardwareBenchmarker
+from currency import usd_to_mdl
 from db import init_database
 from estimation import (
     estimate_fallback_price,
@@ -38,9 +42,8 @@ from scoring import (
     CATEGORY_EMOJI,
     CATEGORY_LABEL,
     MAX_PRICE_MDL,
-    MDL_USD_RATE,  # Import MDL_USD_RATE
     MIN_PRICE_MDL,
-    MIN_YEAR,
+    is_rankable,
     is_unwanted_ad,
     score_laptop,
 )
@@ -213,7 +216,7 @@ class LaptopAnalyzer:
                 estimated_price_mdl = estimate_fallback_price(
                     cpu_val, gpu_val, ram_val, ssd_val
                 )
-                prices[lap_id] = {"current_usd": estimated_price_mdl / MDL_USD_RATE, "fallback": True}
+                prices[lap_id] = {"current_usd": estimated_price_mdl / usd_to_mdl(), "fallback": True}
 
             # Fallback for NBC Score (also when the AI search returned an
             # implausible rating — e.g. the 12%/15% hallucinations).
@@ -308,11 +311,20 @@ class LaptopAnalyzer:
                 specs.update({"title": title, "price": price, "url": url})
                 final_list.append(specs)
 
+            # Ads arrive newest first; whatever is over the cap waits for the
+            # next run rather than spending the quota the review needs.
+            deferred = to_ai_batch[AI_EXTRACT_MAX_ADS:]
+            to_ai_batch = to_ai_batch[:AI_EXTRACT_MAX_ADS]
+            if deferred:
+                log.warning("AI extraction capped at %d ads; %d deferred to the next run",
+                            AI_EXTRACT_MAX_ADS, len(deferred))
+            ai_parsed = 0
             if to_ai_batch:
                 log.info(f"AI Batch Processing: {len(to_ai_batch)} ads...")
                 batch_map = {a['id']: a for a in to_ai_batch}
                 ads_map = {str(row[0]): row for row in ads}
                 ai_results = self.ai.extract_specs(to_ai_batch)
+                ai_parsed = len(ai_results)
                 for res in ai_results:
                     orig = batch_map.get(res['id'])
                     ad_ref = ads_map.get(res['id'])
@@ -334,12 +346,9 @@ class LaptopAnalyzer:
 
         for lap in final_list:
             cpu_val = lap.get('cpu_score') or 0
-            if cpu_val < MIN_CPU_SCORE:
+            if not is_rankable(cpu_val, lap.get('year_est'), MIN_CPU_SCORE):
                 continue
-
             year = lap.get('year_est') or current_year - 5
-            if year < MIN_YEAR:
-                continue
 
             ram = lap.get('ram') or 4
             ssd_gb = lap.get('ssd') or 0
@@ -429,7 +438,7 @@ class LaptopAnalyzer:
                     vs_pct = "—"
                     # Use the current_usd from wp, which now includes fallbacks
                     if wp.get('current_usd'):
-                        world_mdl = wp['current_usd'] * MDL_USD_RATE
+                        world_mdl = wp['current_usd'] * usd_to_mdl()
                         # Avoid division by zero if world_mdl is 0
                         if world_mdl != 0:
                             diff = (r['price'] - world_mdl) / world_mdl * 100
@@ -451,6 +460,17 @@ class LaptopAnalyzer:
                 w("\n* - Estimated value (fallback)")
 
         log.info(f"Report saved to {report_name}")
+        run_summary.write("Analysis", {
+            "ads in the latest scrape": len(ads),
+            "sent to AI (regex failed)": len(to_ai_batch),
+            "parsed by AI": ai_parsed,
+            "deferred to next run": len(deferred),
+            "ranked": len(processed),
+            "AI requests": openrouter.usage["requests"],
+            "answered by fallback model": openrouter.usage["fallback"],
+            "AI requests failed": openrouter.usage["failed"],
+        })
+        return processed
 
 
 if __name__ == "__main__":

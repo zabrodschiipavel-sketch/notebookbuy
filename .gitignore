@@ -30,6 +30,8 @@ digest_history.json
 
 # Reports
 *.txt
+# Pinned deps for the daily workflow (gitignore has no trailing comments)
+!requirements-lock.txt
 *.log
 
 # Patch / diff artifacts
@@ -40,7 +42,8 @@ digest_history.json
 build/
 dist/
 *.spec
-!laptop_finder.spec   # the build recipe is tracked on purpose
+# The build recipe is tracked on purpose
+!laptop_finder.spec
 *.exe
 
 # Environment variables

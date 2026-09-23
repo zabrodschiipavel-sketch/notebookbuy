@@ -23,6 +23,10 @@ jobs:
     # Бесплатные модели стоят в очереди; зависший запуск не должен жечь
     # минуты Actions до шестичасового лимита.
     timeout-minutes: 60
+    # Запись нужна ровно для одного: публиковать снимок состояния в ветку
+    # pipeline-data (шаг «Publish state snapshot» в конце).
+    permissions:
+      contents: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -35,13 +39,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Версии закреплены в requirements-lock.txt: свежий релиз любой
+      # зависимости больше не может сломать утренний дайджест. Дрейф ловит
+      # еженедельный CI, который ставит незакреплённые версии.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install .
+          pip install -r requirements-lock.txt
+          pip install --no-deps .
 
       # Восстанавливаем БД и кэш-файлы из кэша GitHub Actions
       - name: Restore Scraper Cache & DB
+        id: cache
         uses: actions/cache/restore@v5
         with:
           path: |
@@ -53,8 +62,23 @@ jobs:
           restore-keys: |
             scraper-db-cache-
 
-      # Запуск сбора объявлений по всей Молдове
+      # Кэш Actions удаляется через 7 дней без обращений. Если он пропал,
+      # берём последний снимок из ветки pipeline-data — иначе история цен
+      # и дайджестов обнулилась бы без единой ошибки.
+      - name: Restore state snapshot (cache miss)
+        if: steps.cache.outputs.cache-matched-key == ''
+        run: |
+          if git fetch --depth=1 origin pipeline-data; then
+            git show FETCH_HEAD:state.tar.gz > "$RUNNER_TEMP/state.tar.gz"
+            python state_snapshot.py unpack "$RUNNER_TEMP/state.tar.gz"
+          else
+            echo "::warning title=Empty state::No cache and no pipeline-data snapshot — starting from an empty database"
+          fi
+
+      # Запуск сбора объявлений по всей Молдове. Упавший скрап валит запуск:
+      # иначе анализ и дайджест прошли бы по вчерашним данным.
       - name: Run Scraper (All Moldova)
+        id: scrape
         run: |
           python lappars.py --once --region all
 
@@ -102,8 +126,33 @@ jobs:
             digest_history.json
           key: scraper-db-cache-${{ github.run_id }}
 
+      # Снимок состояния в ветку pipeline-data: один коммит без истории,
+      # перезаписывается каждый день, так что репозиторий не разрастается.
+      # Скрипт отказывается публиковать базу, которая усохла больше чем вдвое
+      # относительно прошлого снимка, — это сломанное восстановление, а не
+      # тихий день, и затирать им единственную хорошую копию нельзя.
+      - name: Publish state snapshot
+        if: always() && steps.scrape.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          out="$RUNNER_TEMP/snapshot"
+          mkdir -p "$out"
+          if git fetch --depth=1 origin pipeline-data; then
+            git show FETCH_HEAD:state_meta.json > "$RUNNER_TEMP/prev_meta.json" || true
+          fi
+          python state_snapshot.py pack "$out" --previous "$RUNNER_TEMP/prev_meta.json"
+          cd "$out"
+          git init -q -b pipeline-data
+          git add state.tar.gz state_meta.json
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "State snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" pipeline-data
+
       # Загружаем сгенерированные текстовые и CSV отчеты как артефакты сборки
       - name: Upload Analysis Reports
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: laptop-reports

@@ -233,3 +233,35 @@ def test_modern_u_series_keeps_the_year_the_ad_states():
     2009 it overwrote an honest "2023" and the ad fell below MIN_YEAR."""
     res = LaptopParser.regex_parse("ноутбук 2023 года", "Lenovo IdeaPad i5-1235U 8gb")
     assert res["year_est"] == 2023
+
+
+def test_ssd_m2_mention_does_not_hide_the_real_cpu():
+    """The first CPU-looking match was an M.2 slot; the guard cleared it and
+    the actual i5 after it was never looked at."""
+    res = LaptopParser.regex_parse("ssd m2 512gb, процессор i5-8250u", "HP ProBook")
+    assert res["cpu"] == "i5-8250u"
+
+
+@pytest.mark.parametrize("title, cpu, year", [
+    ("ASUS Zenbook Ryzen AI 9 HX 370 32gb", "ryzen ai 9 hx 370", 2024),
+    ("ROG Flow Ryzen AI Max+ 395 64gb", "ryzen ai max+ 395", 2025),
+    ("MacBook Air M5 16gb 512gb", "m5", 2025),
+    ("Lenovo Yoga Core Ultra 7 255H", "core ultra 7 255h", 2025),
+    ("Dell Latitude Core 7 150U 16gb", "core 7 150u", 2024),
+    ("Lenovo LOQ Ryzen 7 260 RTX 4060", "ryzen 7 260", 2025),
+])
+def test_current_generation_cpus_are_recognised(title, cpu, year):
+    """Unrecognised CPUs go to the AI and spend its daily quota; misdated ones
+    take the wrong age penalty."""
+    res = LaptopParser.regex_parse("", title)
+    assert res["cpu"] == cpu
+    assert res["year_est"] == year
+
+
+def test_current_year_in_the_text_is_read():
+    """The year regex used to stop at 2025."""
+    import datetime
+    year = datetime.date.today().year
+    # No CPU here: the CPU cross-check would cap the year a year from now.
+    res = LaptopParser.regex_parse(f"модель {year} года", "Lenovo Legion")
+    assert res["year_est"] == year
