@@ -126,7 +126,7 @@ MIN_CPU_SCORE = _env_int("MIN_CPU_SCORE", DEFAULT_MIN_CPU_SCORE)
 # The scrape pages through the whole category. It used to be one 500-ad request,
 # and every listing past it dropped out of the ranking and price tracking.
 SCRAPE_PAGE_SIZE = max(10, _env_int("SCRAPE_PAGE_SIZE", 200))
-SCRAPE_MAX_ADS = max(1, _env_int("SCRAPE_MAX_ADS", 3000))
+SCRAPE_MAX_ADS = max(1, _env_int("SCRAPE_MAX_ADS", 5000))
 SCRAPE_PAGE_DELAY_SEC = max(0.0, _env_float("SCRAPE_PAGE_DELAY_SEC", 1.5))
 # Regex parsing is cheap, so the analyzer looks at everything scraped.
 ADS_ANALYZE_LIMIT = max(1, _env_int("ADS_ANALYZE_LIMIT", SCRAPE_MAX_ADS))

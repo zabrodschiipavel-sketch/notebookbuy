@@ -171,7 +171,7 @@ Brave allows **1 req/s and 2000/month**, far more than a daily run needs. See
 
 ```bash
 # Fetch latest ads (--region all covers Moldova; default is balti).
-# Pages through the category up to SCRAPE_MAX_ADS (3000).
+# Pages through the category up to SCRAPE_MAX_ADS (5000).
 python lappars.py --once --region all
 
 # Analyze & score

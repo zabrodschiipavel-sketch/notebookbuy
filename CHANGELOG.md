@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The scrape pages through the whole category** (`SCRAPE_PAGE_SIZE`,
-  `SCRAPE_MAX_ADS`, default 3000). It was one 500-ad request, and the analyzer
+  `SCRAPE_MAX_ADS`, default 5000 — the category held 3291 ads on the first
+  live run, so 3000 still cut off the oldest). It was one 500-ad request, and the analyzer
   only ranks ads the latest scrape touched, so every listing past the first
   page dropped out of the ranking and out of price tracking. Pages are retried,
   deduplicated (the listing shifts while it is paged), and a failure after the
