@@ -23,6 +23,15 @@ PASSMARK_CACHE_FILES = {
     "gpu": "passmark_gpu.json",
 }
 
+# Words a query may carry that the Passmark name for the same part lacks.
+_VENDOR_NOISE = frozenset({"nvidia", "amd", "intel", "graphics", "laptop", "gpu", "mobile"})
+_VENDOR_NOISE_RE = re.compile(r"\b(?:" + "|".join(sorted(_VENDOR_NOISE)) + r")\b", re.IGNORECASE)
+
+
+def _words(text: str) -> set[str]:
+    return set(re.sub(r'[^a-z0-9\s]', '', text.lower()).split())
+
+
 class HardwareBenchmarker:
     def __init__(self, hw_type: str):
         self.hw_type = hw_type
@@ -96,16 +105,21 @@ class HardwareBenchmarker:
 
         # 1. Subset match (fast)
         cleaned = self._clean_name(query)
-        q_words = set(re.sub(r'[^a-z0-9\s]', '', cleaned.lower()).split())
+        q_words = _words(cleaned)
         if not q_words:
             return 0
 
-        candidates = []
-        for item in self.items:
-            name_lower = item.get("name", "").lower()
-            name_words = set(re.sub(r'[^a-z0-9\s]', '', name_lower).split())
-            if q_words.issubset(name_words):
-                candidates.append(item)
+        candidates = self._subset_candidates(q_words)
+        if not candidates:
+            # The AI writes "NVIDIA GeForce RTX 3050"; Passmark lists "GeForce
+            # RTX 3050 ...". One vendor word the name lacks sank the subset
+            # match, and the fuzzy pass then settled on "GeForce 205" — 126
+            # points for a ~10 000-point card. Retry without such words, but
+            # only while a model number remains to anchor the match.
+            core = q_words - _VENDOR_NOISE
+            if core != q_words and any(ch.isdigit() for word in core for ch in word):
+                candidates = self._subset_candidates(core)
+                cleaned = " ".join(_VENDOR_NOISE_RE.sub(" ", cleaned).split())
 
         if candidates:
             # Rank candidates by name similarity to query, and return the closest match's score
@@ -118,6 +132,9 @@ class HardwareBenchmarker:
             return self.items[match[2]].get(self.score_key, 0)
 
         return 0
+
+    def _subset_candidates(self, q_words: set[str]) -> list[dict]:
+        return [item for item in self.items if q_words <= _words(item.get("name", ""))]
 
     @staticmethod
     def _clean_name(name: str) -> str:

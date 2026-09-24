@@ -19,5 +19,5 @@ Include steps to reproduce, impact, and affected version when possible.
 
 ## Secrets
 
-- Never commit `.env` or `GEMINI_API_KEY` values.
+- Never commit `.env` or API key values (`OPENROUTER_API_KEY`, `BRAVE_API_KEY`, `TELEGRAM_BOT_TOKEN`).
 - Rotate any API key that was accidentally exposed in git history or logs.

@@ -18,9 +18,9 @@ A GitHub Actions cron runs the whole pipeline daily and sends the result to a Te
 |---------|-------------|
 | **GraphQL Scraper** | Direct API queries — no HTML parsing overhead |
 | **Hardware Scoring** | Passmark CPU + GPU fuzzy-match benchmarks |
-| **AI Spec Extraction** | Gemini fallback when regex can't parse the ad |
+| **AI Spec Extraction** | A free OpenRouter model reads the ads regex can't parse, ten per request |
 | **Real World Prices** | Brave Search finds retail and review pages; the model reads the figures out of them |
-| **Scam Screening** | Heuristics plus a Gemini pass over the shortlist drop parsing garbage and locked/stolen units |
+| **Scam Screening** | Heuristics plus an AI pass over the shortlist drop parsing garbage and locked/stolen units |
 | **Honest Labelling** | Anything computed rather than found is marked `≈` and named an estimate |
 | **Telegram Digest** | Daily shortlist with price-drop alerts; repeats are held back |
 | **Price Tracking** | Every price change is recorded; history visualized per ad |
@@ -38,7 +38,8 @@ graph TD
     C -->|Read| D[laptop_analyzer_v3.py]
     D --> E[parser.py — Regex]
     D --> F[benchmarks.py — Passmark]
-    D --> G[ai_service.py — Gemini]
+    D --> G[ai_service.py]
+    G --> O[openrouter.py — OpenRouter]
     G --> W[web_search.py — Brave]
     D --> H[scoring.py — Value Score]
     H -->|Write| C
@@ -46,7 +47,7 @@ graph TD
     C -->|Feed| I[laptop_dashboard.py — Streamlit]
 ```
 
-Regex parses what it can; only ads it fails on go to Gemini. Passmark supplies the raw
+Regex parses what it can; only ads it fails on go to the AI model. Passmark supplies the raw
 performance numbers. World prices and Notebookcheck ratings are looked up through Brave
 and read out of the returned snippets — when a lookup finds nothing, a component-based
 formula fills in and **the digest marks that value as an estimate** rather than passing
@@ -64,27 +65,34 @@ notebookbuy/
 ├── benchmarks.py           # Passmark data fetch, cache, and fuzzy search
 ├── scoring.py              # Value-score formula, classification, SSD heuristic
 ├── estimation.py           # Shared component-based fallback price/score
-├── ai_service.py           # Gemini extraction, deal review, per-model rate limits
+├── ai_service.py           # Batched spec extraction, deal review, snippet reading
+├── openrouter.py           # OpenRouter client: fallback chain, JSON, catalog check
 ├── web_search.py           # Brave Search client for price/review lookups
 ├── currency.py             # Dynamic exchange rate fetching
 ├── db.py                   # SQLite schema, migrations, context manager
 ├── app_config.py           # Env-based runtime configuration
 ├── retry_utils.py          # Rate limiter + retry that honours server back-off
+├── run_summary.py          # Per-step table on the GitHub Actions run page
+├── state_snapshot.py       # Pack/restore DB + caches to the pipeline-data branch
+├── requirements-lock.txt   # Pinned deps for the daily workflow
 ├── launcher.py             # PyInstaller .exe entry point
 ├── query_999.graphql       # GraphQL query for 999.md ads
 ├── pyproject.toml          # Project metadata, dependencies, ruff, pytest
 ├── .env.example            # Template for environment variables
-├── tests/                  # 145 tests — see `pytest -v`
+├── tests/                  # see `pytest -v`
 │   ├── test_parser.py          # Regex extraction
 │   ├── test_scoring.py         # Scoring, classification & SSD heuristic
 │   ├── test_estimation.py      # Fallback price/score estimation
 │   ├── test_benchmarks.py      # Passmark fuzzy-match lookup
 │   ├── test_lappars.py         # Price-tracking upsert & GraphQL parse
 │   ├── test_send_telegram.py   # Digest selection, novelty, drops, formatting
-│   ├── test_ai_service.py      # Deal review, rate limiting, Brave lookups
+│   ├── test_ai_service.py      # Batching, deal review, Brave lookups
+│   ├── test_openrouter.py      # Fallbacks, retries, JSON parsing (fake transport)
 │   ├── test_web_search.py      # Brave client (fake transport, no network)
 │   ├── test_retry_utils.py     # Rate limiter & back-off
 │   ├── test_analyzer_cache.py  # External-lookup cache markers
+│   ├── test_analyzer_pipeline.py # LaptopAnalyzer.run() end to end
+│   ├── test_state_snapshot.py  # State pack/restore and its guards
 │   ├── test_currency.py        # Exchange rate fallback
 │   └── test_db.py              # Schema creation & migration
 └── .github/
@@ -129,19 +137,41 @@ Each key buys back a specific capability:
 
 | Variable | What it enables | Without it |
 |----------|-----------------|------------|
-| `GEMINI_API_KEY` | Spec extraction for ads regex can't parse; scam review of the shortlist | Those ads drop out of the ranking; no AI review |
+| `OPENROUTER_API_KEY` | Spec extraction for ads regex can't parse; scam review of the shortlist | Those ads drop out of the ranking; no AI review |
 | `BRAVE_API_KEY` | Real world prices and Notebookcheck ratings | Both come from the component formula, marked `≈` |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Sending the digest | `send_telegram.py` exits with a config error |
 
-Free-tier limits worth knowing: Gemini allows **15 requests per minute per model** — the
-client throttles to `GEMINI_RPM_LIMIT` (12) rather than firing until it gets 429s. Brave
-allows **1 req/s and 2000/month**, far more than a daily run needs. See `.env.example`
-for the full list of tunables.
+#### AI models
+
+Every AI call goes to OpenRouter and asks for JSON, with a fallback chain resolved
+server-side inside the same request:
+
+| Role | Default | Why |
+|------|---------|-----|
+| Primary | `nvidia/nemotron-3-super-120b-a12b:free` | Free **and** enforces structured outputs. Nemotron 3 Ultra ranks higher on the free charts but ignores `response_format`, and every call here is JSON. |
+| Fallback | `meta/muse-spark-1.3-contributor` | Answers when the primary is down, gone or out of quota. Not a `:free` variant: it bills per token — cents a month at this volume — and has rate limits of its own. |
+
+Three account settings decide whether the defaults work:
+
+- **Privacy** — allow endpoints that may train on prompts. Free models and the
+  Contributor tier do; otherwise OpenRouter refuses them with a 404.
+- **Credits** — the paid fallback needs a positive balance.
+- **Daily cap** — free models allow 20 requests/minute and **50 requests/day**, or
+  1000/day once $10 of credits has ever been bought. Extraction sends ten ads per
+  request, so a morning run needs roughly 10–30 requests.
+
+The free roster changes month to month. `python openrouter.py` prints the free models
+that currently support structured outputs and flags any configured model that has
+left the catalog; the daily workflow runs it and raises a warning on the run.
+
+Brave allows **1 req/s and 2000/month**, far more than a daily run needs. See
+`.env.example` for the full list of tunables.
 
 ### 3. Run
 
 ```bash
-# Fetch latest ads (--region all covers Moldova; default is balti)
+# Fetch latest ads (--region all covers Moldova; default is balti).
+# Pages through the category up to SCRAPE_MAX_ADS (5000).
 python lappars.py --once --region all
 
 # Analyze & score
@@ -159,8 +189,20 @@ streamlit run laptop_dashboard.py
 ## 📬 The Daily Digest
 
 `.github/workflows/daily_scrape.yml` runs the pipeline at 06:00 UTC and posts a
-shortlist to Telegram. The database and lookup caches persist between runs through the
-Actions cache.
+shortlist to Telegram.
+
+- **State survives a quiet week.** The database and lookup caches live in the Actions
+  cache, which GitHub evicts after 7 days without access. After each successful scrape
+  `state_snapshot.py` also publishes them to the `pipeline-data` branch (one commit,
+  overwritten daily), and a run that misses the cache restores from there. It refuses to
+  publish a database that shrank below half of the previous snapshot — that is a broken
+  restore, and it must not overwrite the only good copy.
+- **Failures fail the run.** A scrape that fetched nothing, or a digest that was not
+  delivered, exits non-zero instead of carrying on over yesterday's data or staying green
+  through a week of silence. Each step writes its numbers (ads fetched, sent to AI,
+  answered by the fallback model, messages delivered) to the run's summary page.
+- **Pinned dependencies.** The daily job installs `requirements-lock.txt`; the weekly CI
+  run installs unpinned versions, so drift shows up there first.
 
 What the digest does beyond ranking by score:
 
@@ -176,7 +218,7 @@ What the digest does beyond ranking by score:
 - **Reports price drops.** A separate block lists laptops that got cheaper, filtered
   against sellers correcting a typo (a "-99% drop") and spare-parts ads.
 - **Screens for scams.** Heuristics flag suspiciously cheap Apple Silicon (MDM/iCloud
-  locks); a Gemini pass over the shortlist drops listings whose specs contradict the
+  locks); an AI pass over the shortlist drops listings whose specs contradict the
   title and warns about the rest.
 
 ---
@@ -212,7 +254,7 @@ pytest -v
 ruff check .
 ```
 
-No test touches the network: the Brave client, the Gemini calls and the Telegram send
+No test touches the network: the Brave client, the OpenRouter calls and the Telegram send
 are all exercised through fakes. Configuration for both tools lives in `pyproject.toml`.
 CI runs them on Python 3.10, 3.12 and 3.14 for every push and pull request, plus weekly
 — dependencies are unpinned and the daily job installs them fresh each morning, so drift

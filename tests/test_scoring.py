@@ -30,6 +30,12 @@ def test_infer_ssd_gb(ssd, year, is_apple, expected):
     [
         ("Intel Core i7-12700H", 2022),
         ("i5-1135g7", 2021),
+        # 4-digit 12th/13th-gen U/P parts: once dated 2009 and dropped by MIN_YEAR.
+        ("i5-1235u", 2022),
+        ("Intel Core i7-1260P", 2022),
+        ("i7-1355U", 2023),
+        ("i5-10210U", 2019),
+        ("i7-8550U", 2017),
         ("Core Ultra 7 155H", 2024),
         ("AMD Ryzen 7 5800H", 2021),
         ("Apple M2 Pro", 2022),

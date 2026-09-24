@@ -6,14 +6,17 @@ import os
 import random
 import re
 import sqlite3
+import sys
 import time
 
 import requests
 from bs4 import BeautifulSoup  # Moved import to top for broader use
 
-from app_config import ADS_ANALYZE_LIMIT, DB_NAME
-from currency import EUR_TO_MDL, USD_TO_MDL
+import run_summary
+from app_config import DB_NAME, SCRAPE_MAX_ADS, SCRAPE_PAGE_DELAY_SEC, SCRAPE_PAGE_SIZE
+from currency import eur_to_mdl, usd_to_mdl
 from db import init_database
+from retry_utils import call_with_retry
 
 
 # Configure logging
@@ -25,7 +28,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ================= SETTINGS =================
-ADS_TO_DOWNLOAD = ADS_ANALYZE_LIMIT
 CHECK_INTERVAL = 600  # 10 minutes
 GRAPHQL_URL = "https://999.md/graphql"
 
@@ -220,9 +222,9 @@ def _price_mdl_from_ad(ad: dict) -> float:
         return 0.0
     raw_price = float("".join(digits))
     if "€" in val_str or "eur" in val_str:
-        return raw_price * EUR_TO_MDL
+        return raw_price * eur_to_mdl()
     if "$" in val_str or "usd" in val_str:
-        return raw_price * USD_TO_MDL
+        return raw_price * usd_to_mdl()
     return raw_price
 
 
@@ -338,18 +340,11 @@ def _html_fallback_description(ad_url: str) -> str:
 
 
 # ================= 3. MAIN FETCH LOOP =================
-def fetch_and_process(region: str = "balti"):
-    """Fetch all laptop ads from 999.md and upsert them into the local database."""
-    log.info("Checking for new/updated ads...")
-
-    if not FULL_QUERY:
-        log.error("GraphQL query not loaded. Skipping fetch.")
-        return
-
-    variables = {
+def _search_variables(region: str, skip: int, limit: int) -> dict:
+    return {
         "isWorkCategory": False,
         "includeCarsFeatures": False,
-        "includeBody": True, # Optimized: Fetch body directly via GraphQL
+        "includeBody": True,  # Fetch the body directly via GraphQL
         "includeOwner": False,
         "includeBoost": False,
         "locale": "ru_RU",
@@ -358,87 +353,156 @@ def fetch_and_process(region: str = "balti"):
             "filters": [
                 {"filterId": 290, "features": [{"featureId": 7, "optionIds": [12912]}]}
             ] if region == "balti" else [],
-            "pagination": {"limit": ADS_TO_DOWNLOAD, "skip": 0},
-            "subCategoryId": 4
-        }
+            "pagination": {"limit": limit, "skip": skip},
+            "subCategoryId": 4,
+        },
     }
 
+
+def fetch_page(region: str, skip: int, limit: int) -> tuple[list[dict], int]:
+    """One SearchAds page plus the category total. Raises on any failure."""
+    resp = requests.post(
+        GRAPHQL_URL,
+        json={
+            "operationName": "SearchAds",
+            "query": FULL_QUERY,
+            "variables": _search_variables(region, skip, limit),
+        },
+        headers=HEADERS,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}")
+    data = resp.json()
+    if data.get("errors"):
+        raise RuntimeError(f"GraphQL errors: {data['errors']}")
+    search = (data.get("data") or {}).get("searchAds") or {}
+    return search.get("ads") or [], int(search.get("count") or 0)
+
+
+def fetch_all_ads(
+    region: str,
+    page_size: int = SCRAPE_PAGE_SIZE,
+    max_ads: int = SCRAPE_MAX_ADS,
+    fetch=fetch_page,
+) -> list[dict]:
+    """Page through the category until it runs out or *max_ads* is reached.
+
+    A single 500-ad request used to be the whole scrape: every listing past the
+    first page dropped out of the ranking and out of price tracking. A failure
+    on the first page raises; a failure later keeps what was already fetched.
+    """
+    ads: list[dict] = []
+    seen: set[str] = set()
+    skip = 0
+    while len(ads) < max_ads:
+        limit = min(page_size, max_ads - len(ads))
+        try:
+            page, total = call_with_retry(
+                lambda s=skip, n=limit: fetch(region, s, n),
+                max_retries=3,
+                base_delay_sec=5.0,
+                label=f"999.md page skip={skip}",
+            )
+        except Exception:
+            if not ads:
+                raise
+            log.warning("Page at skip=%d failed; keeping the %d ads fetched so far", skip, len(ads))
+            break
+        # New ads shift the listing while it is paged, so a page can repeat
+        # entries from the previous one.
+        fresh = [ad for ad in page if str(ad.get("id")) not in seen]
+        seen.update(str(ad.get("id")) for ad in fresh)
+        ads.extend(fresh)
+        skip += len(page)
+        log.info("Fetched %d ads (%d of %s in the category)", len(ads), skip, total or "?")
+        if len(page) < limit or not fresh or (total and skip >= total):
+            break
+        time.sleep(SCRAPE_PAGE_DELAY_SEC)
+    return ads[:max_ads]
+
+
+def _store_ads(ads: list[dict]) -> dict[str, int]:
+    """Upsert parsed ads and record price changes; returns the tally."""
+    stats = {"new": 0, "price_drop": 0, "price_rise": 0, "unchanged": 0}
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        for ad in ads:
+            parsed = parse_graphql_ad(ad)
+            ad_id, title, ad_url = parsed["id"], parsed["title"], parsed["url"]
+            price, body_content = parsed["price"], parsed["body"]
+
+            old_price = get_current_price(cursor, ad_id)
+
+            # If no description in GraphQL (rare), try to fetch it via HTML
+            if not body_content and (old_price is None or abs(price - old_price) / max(old_price, 1) > 0.01):
+                body_content = _html_fallback_description(ad_url) or body_content
+
+            ad_data = {
+                'ID': ad_id, 'Заголовок': title, 'Цена': price,
+                'Валюта': 'MDL', 'Ссылка': ad_url, 'HTML_страницы': body_content,
+                'Изображение': parsed["image_url"],
+            }
+
+            result = save_or_update_ad(cursor, ad_data)
+            stats[result] = stats.get(result, 0) + 1
+
+            if result == "new":
+                log.info("✅ New:        %-45s | %6d MDL", title[:45], int(price))
+            elif result == "price_drop":
+                log.info("📉 Drop:       %-45s | %6d → %6d MDL  (-%d)", title[:45], int(old_price), int(price), int(old_price - price))
+            elif result == "price_rise":
+                log.info("📈 Rise:       %-45s | %6d → %6d MDL  (+%d)", title[:45], int(old_price), int(price), int(price - old_price))
+
+        conn.commit()
+    return stats
+
+
+def fetch_and_process(region: str = "balti") -> dict[str, int] | None:
+    """Fetch laptop ads from 999.md and upsert them into the local database.
+
+    Returns the tally, or None when nothing could be fetched — the caller
+    decides whether that fails the run.
+    """
+    log.info("Checking for new/updated ads...")
+
+    if not FULL_QUERY:
+        log.error("GraphQL query not loaded. Skipping fetch.")
+        return None
+
     try:
-        resp = requests.post(
-            GRAPHQL_URL,
-            json={"operationName": "SearchAds", "query": FULL_QUERY, "variables": variables},
-            headers=HEADERS,
-            timeout=15
-        )
-        if resp.status_code != 200:
-            log.error(f"HTTP {resp.status_code}")
-            return
-        data = resp.json()
-        if 'errors' in data:
-            log.error(f"GraphQL errors: {data['errors']}")
-            return
-
-        ads = data.get('data', {}).get('searchAds', {}).get('ads', [])
+        ads = fetch_all_ads(region)
         if not ads:
-            log.warning("No ads found in response.")
-            return
-
-        stats = {"new": 0, "price_drop": 0, "price_rise": 0, "unchanged": 0}
-
-        with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-
-            for ad in ads:
-                parsed = parse_graphql_ad(ad)
-                ad_id, title, ad_url = parsed["id"], parsed["title"], parsed["url"]
-                price, body_content = parsed["price"], parsed["body"]
-
-                old_price = get_current_price(cursor, ad_id)
-
-                # If no description in GraphQL (rare), try to fetch it via HTML
-                if not body_content and (old_price is None or abs(price - old_price) / max(old_price, 1) > 0.01):
-                    body_content = _html_fallback_description(ad_url) or body_content
-
-                ad_data = {
-                    'ID': ad_id, 'Заголовок': title, 'Цена': price,
-                    'Валюта': 'MDL', 'Ссылка': ad_url, 'HTML_страницы': body_content,
-                    'Изображение': parsed["image_url"],
-                }
-
-                result = save_or_update_ad(cursor, ad_data)
-                stats[result] = stats.get(result, 0) + 1
-
-                if result == "new":
-                    log.info("✅ New:        %-45s | %6d MDL", title[:45], int(price))
-                elif result == "price_drop":
-                    drop = old_price - price
-                    log.info("📉 Drop:       %-45s | %6d → %6d MDL  (-%d)", title[:45], int(old_price), int(price), int(drop))
-                elif result == "price_rise":
-                    rise = price - old_price
-                    log.info("📈 Rise:       %-45s | %6d → %6d MDL  (+%d)", title[:45], int(old_price), int(price), int(rise))
-
-            conn.commit()
-
-        log.info(
-            "📊 Summary: new=%d | drops=%d | rises=%d | unchanged=%d",
-            stats['new'], stats['price_drop'], stats['price_rise'],
-            stats['unchanged'],
-        )
-
-        # Show top-5 biggest price drops (≥5%) across entire database
-        drops = get_price_drops(min_drop_pct=5.0)
-        if drops:
-            log.info("🔥 Top price drops (≥5%% from first seen):")
-            for d in drops[:5]:
-                log.info(f"   -{d['drop_pct']:.0f}%  {d['title'][:40]:<40} "
-                         f"{int(d['first_price'])} → {int(d['last_price'])} MDL  {d['url']}")
-
+            log.error("No ads found in response.")
+            return None
+        stats = _store_ads(ads)
     except Exception as e:
         log.error("Error in fetch_and_process: %s", e, exc_info=True)
+        return None
+
+    log.info(
+        "📊 Summary: new=%d | drops=%d | rises=%d | unchanged=%d",
+        stats['new'], stats['price_drop'], stats['price_rise'], stats['unchanged'],
+    )
+    run_summary.write("Scrape", {
+        "ads fetched": len(ads),
+        "new": stats["new"],
+        "price drops": stats["price_drop"],
+        "price rises": stats["price_rise"],
+    })
+
+    # Show top-5 biggest price drops (≥5%) across entire database
+    drops = get_price_drops(min_drop_pct=5.0)
+    if drops:
+        log.info("🔥 Top price drops (≥5%% from first seen):")
+        for d in drops[:5]:
+            log.info(f"   -{d['drop_pct']:.0f}%  {d['title'][:40]:<40} "
+                     f"{int(d['first_price'])} → {int(d['last_price'])} MDL  {d['url']}")
+    return stats
 
 
 # ================= 4. CLI ENTRY POINT =================
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch laptop ads from 999.md")
     parser.add_argument("--once", action="store_true", help="Run one fetch cycle and exit")
     parser.add_argument("--interval", type=int, default=CHECK_INTERVAL, help="Polling interval in seconds")
@@ -450,8 +514,9 @@ def main():
     log.info(f"Database: {DB_NAME} | Interval: {args.interval // 60} min | Region: {args.region}")
 
     if args.once:
-        fetch_and_process(region=args.region)
-        return
+        # A failed scrape must fail the run: otherwise the analyzer and the
+        # digest carry on over yesterday's data as if it were today's.
+        return 0 if fetch_and_process(region=args.region) is not None else 1
 
     while True:
         fetch_and_process(region=args.region)
@@ -460,4 +525,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

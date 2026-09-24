@@ -106,3 +106,28 @@ def test_call_with_retry_acquires_limiter_per_attempt(monkeypatch):
 
     assert call_with_retry(fn, max_retries=3, limiter=limiter) == "ok"
     assert len(calls) == 3
+
+
+def test_parse_retry_delay_prefers_the_retry_after_attribute():
+    exc = RuntimeError("429 rate limited")
+    exc.retry_after = 12
+    assert parse_retry_delay(exc) == 12.0
+
+
+def test_call_with_retry_stops_on_a_non_retryable_error(monkeypatch):
+    monkeypatch.setattr(retry_utils.time, "sleep", lambda _: None)
+    attempts = 0
+
+    class Permanent(RuntimeError):
+        retryable = False
+
+    def fn():
+        nonlocal attempts
+        attempts += 1
+        raise Permanent("401 bad key")
+
+    try:
+        call_with_retry(fn, max_retries=5)
+    except Permanent:
+        pass
+    assert attempts == 1

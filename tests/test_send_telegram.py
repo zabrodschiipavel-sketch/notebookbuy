@@ -1,4 +1,5 @@
 """Tests for the Telegram digest: deal selection, cache lookup, formatting."""
+import send_telegram
 from app_config import DIGEST_REGION
 from estimation import external_cache_key, plausible_nbc_score
 from send_telegram import (
@@ -377,7 +378,7 @@ def test_format_deal_renders_ai_note():
         "ai_note": "⚠️ проверьте, продаётся ли сам ноутбук",
     }
     text = format_deal(1, deal)
-    assert "Gemini:" in text
+    assert "AI:" in text
     assert "проверьте, продаётся ли сам ноутбук" in text
 
 
@@ -473,3 +474,98 @@ def test_format_deal_region_only_in_moldova_section():
     assert "Регион" in format_deal(1, deal, show_region=True)
     assert "Регион" not in format_deal(1, deal, show_region=False)
     assert "РИСК" in format_deal(1, deal)
+
+
+def test_process_deals_applies_the_analyzer_quality_bar():
+    """The digest scores listings itself and used to skip the analyzer's
+    MIN_YEAR / MIN_CPU_SCORE checks — a cheap enough old machine got through."""
+    rows = [
+        make_row(id=1),
+        make_row(id=2, year_est=2012),
+        make_row(id=3, cpu_score=1500, price=800),
+    ]
+    assert [d["id"] for d in process_deals(rows, {}, {}, COMPONENTS)] == [1]
+
+
+# ---------- delivery ----------
+
+class _TgResponse:
+    def __init__(self, status, body=None):
+        self.status_code = status
+        self._body = body or {}
+        self.text = str(self._body)
+
+    def json(self):
+        return self._body
+
+
+def _fake_post(monkeypatch, responses):
+    sent = []
+
+    def post(url, json, timeout):
+        sent.append(json)
+        return responses.pop(0)
+
+    monkeypatch.setattr(send_telegram.requests, "post", post)
+    slept = []
+    monkeypatch.setattr(send_telegram.time, "sleep", slept.append)
+    return sent, slept
+
+
+def test_send_message_waits_out_telegram_rate_limit(monkeypatch):
+    sent, slept = _fake_post(monkeypatch, [
+        _TgResponse(429, {"parameters": {"retry_after": 7}}),
+        _TgResponse(200),
+    ])
+    assert send_telegram.send_message("u", "hi") is True
+    assert len(sent) == 2 and slept == [7.0]
+
+
+def test_send_message_does_not_retry_a_bad_request(monkeypatch):
+    sent, _ = _fake_post(monkeypatch, [_TgResponse(400, {"description": "can't parse entities"})])
+    assert send_telegram.send_message("u", "hi") is False
+    assert len(sent) == 1
+
+
+def test_main_fails_without_telegram_config(monkeypatch):
+    monkeypatch.setattr(send_telegram, "TELEGRAM_BOT_TOKEN", None)
+    assert send_telegram.main() == 1
+
+
+def test_main_fails_when_the_digest_is_not_delivered(monkeypatch, tmp_path):
+    """Delivery failures were only logged; the run stayed green."""
+    import sqlite3
+
+    from db import init_database
+
+    db = str(tmp_path / "t.db")
+    init_database(db)
+    row = make_row(id=7)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO ads (id, title, price, currency, url, description, parsed_at) "
+            "VALUES (?, ?, ?, 'MDL', ?, ?, datetime('now'))",
+            (row["id"], row["title"], row["price"], row["url"], row["description"]),
+        )
+        conn.execute(
+            "INSERT INTO analysis_cache (id, cpu, gpu, ram, ssd, is_broken, year_est, cpu_score, gpu_score) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (str(row["id"]), row["cpu"], row["gpu"], row["ram"], row["ssd"], 0,
+             row["year_est"], row["cpu_score"], row["gpu_score"]),
+        )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(send_telegram, "DB_NAME", db)
+    monkeypatch.setattr(send_telegram, "TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setattr(send_telegram, "TELEGRAM_CHAT_ID", "c")
+    monkeypatch.setattr(send_telegram, "ENABLE_AI_REVIEW", False)
+    monkeypatch.setattr(send_telegram, "build_price_drops", lambda rows: [])
+
+    _fake_post(monkeypatch, [_TgResponse(500)] * 3)
+    assert send_telegram.main() == 1
+    assert not (tmp_path / send_telegram.DIGEST_HISTORY_FILE).exists(), (
+        "an undelivered digest must not be recorded as shown"
+    )
+
+    _fake_post(monkeypatch, [_TgResponse(200)])
+    assert send_telegram.main() == 0
+    assert (tmp_path / send_telegram.DIGEST_HISTORY_FILE).exists()

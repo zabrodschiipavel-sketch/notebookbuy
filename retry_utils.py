@@ -14,8 +14,8 @@ T = TypeVar("T")
 
 _RATE_LIMIT_HINTS = ("429", "resource exhausted", "quota", "rate limit", "too many requests")
 
-# Google's genai client stringifies the API error body, which carries the
-# server's own back-off hint: {'@type': '...RetryInfo', 'retryDelay': '16s'}.
+# Some APIs only carry the server's back-off hint inside the stringified error
+# body: {'@type': '...RetryInfo', 'retryDelay': '16s'}.
 _RETRY_DELAY_RE = re.compile(
     r"""['"]?retryDelay['"]?\s*:\s*['"]?(\d+(?:\.\d+)?)s['"]?""",
     re.IGNORECASE,
@@ -25,10 +25,10 @@ _RETRY_DELAY_RE = re.compile(
 class RateLimiter:
     """Thread-safe sliding-window limiter: at most *max_per_window* calls per window.
 
-    Gemini's free tier enforces a per-model requests-per-minute quota. Without a
-    limiter the thread pool burns the whole minute's budget in a few seconds and
-    every subsequent call 429s, so the limiter — not the retry loop — is what
-    keeps the pipeline inside quota.
+    Free API tiers enforce a requests-per-minute quota. Without a limiter the
+    thread pool burns the whole minute's budget in a few seconds and every
+    subsequent call 429s, so the limiter — not the retry loop — is what keeps
+    the pipeline inside quota.
     """
 
     def __init__(self, max_per_window: int, window_sec: float = 60.0):
@@ -57,7 +57,14 @@ class RateLimiter:
 
 
 def parse_retry_delay(exc: BaseException) -> float | None:
-    """Return the server-suggested back-off in seconds, or None when absent."""
+    """Return the server-suggested back-off in seconds, or None when absent.
+
+    An exception may carry it as a ``retry_after`` attribute (taken from the
+    HTTP Retry-After header); otherwise the message text is searched.
+    """
+    retry_after = getattr(exc, "retry_after", None)
+    if isinstance(retry_after, (int, float)) and retry_after >= 0:
+        return float(retry_after)
     match = _RETRY_DELAY_RE.search(str(exc))
     if not match:
         return None
@@ -84,7 +91,9 @@ def call_with_retry(
             return fn()
         except Exception as exc:
             last_error = exc
-            if attempt >= max_retries - 1:
+            # A bad key, an empty balance or a model that no longer exists
+            # fails identically on every attempt — retrying only burns quota.
+            if attempt >= max_retries - 1 or getattr(exc, "retryable", True) is False:
                 break
             msg = str(exc).lower()
             delay = base_delay_sec * (2**attempt)

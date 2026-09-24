@@ -8,7 +8,11 @@ import datetime
 import re
 
 
-ANALYSIS_VERSION = "2026-06-11.1" # Parser fixes: RAM vs SSD sizes, M-chip title guard, warranty years, G7 CPU suffixes
+# Bumped when parsing or benchmark matching changes, so cached analyses are
+# redone. 2026-09-23: 12th/13th-gen Intel U/P chips were dated 2009, and
+# vendor-prefixed GPUs from AI extraction ("NVIDIA GeForce RTX 3050") matched
+# the wrong Passmark entry — cached years and scores are both wrong.
+ANALYSIS_VERSION = "2026-09-23.1"
 
 
 MIN_PRICE_MDL = 500
@@ -64,14 +68,32 @@ def is_unwanted_ad(title: str, description: str = "") -> bool:
     return any(kw in blob for kw in SHOP_SPAM_KEYWORDS)
 
 
-# --- Fallback Tiers and Estimation Logic ---
-MDL_USD_RATE = 18.0
+# USD→MDL conversion lives in currency.py (live rate, cached for a day).
+# Fallback price/score estimation lives in estimation.py.
 
-# The CPU_TIERS, GPU_TIERS, get_cpu_tier_info, get_gpu_tier_info,
-# estimate_fallback_price, and estimate_fallback_score functions
-# have been moved to laptop_analyzer_v3.py to use components_db.json.
-# These are no longer needed here.
-# --- End Fallback Tiers and Estimation Logic ---
+
+# Apple silicon generations and launch years. One table for every module that
+# needs to recognise an M-chip — the list used to be copied into five files
+# and stopped at M4 in all of them.
+APPLE_CHIP_YEARS = {"m1": 2020, "m2": 2022, "m3": 2023, "m4": 2024, "m5": 2025}
+_APPLE_CHIP_RE = re.compile(r"(?<![a-z0-9])(m[1-5])(?![0-9])", re.IGNORECASE)
+
+
+def apple_chip(text: str | None) -> str | None:
+    """'m3' for "Apple M3 Pro" / "m3 max", None when no M-chip is named."""
+    match = _APPLE_CHIP_RE.search(str(text or ""))
+    return match.group(1).lower() if match else None
+
+
+def is_rankable(cpu_score: int | None, year_est: int | None, min_cpu_score: int = MIN_CPU_SCORE) -> bool:
+    """The quality bar a listing must clear to be ranked at all.
+
+    Shared by the analyzer report and the Telegram digest, which each score
+    listings on their own: the digest used to skip both checks, so a 2012
+    machine or a sub-2500 CPU could still reach it on a low price.
+    """
+    year = year_est or datetime.datetime.now().year - 5
+    return (cpu_score or 0) >= min_cpu_score and year >= MIN_YEAR
 
 
 def infer_ssd_gb(ssd: int | None, year_est: int | None, is_apple: bool = False) -> int:
@@ -88,6 +110,31 @@ def infer_ssd_gb(ssd: int | None, year_est: int | None, is_apple: bool = False) 
     return 0
 
 
+_INTEL_GEN_YEARS = {
+    1: 2009, 2: 2011, 3: 2012, 4: 2013, 5: 2015, 6: 2015, 7: 2016, 8: 2017,
+    9: 2018, 10: 2019, 11: 2021, 12: 2022, 13: 2023, 14: 2024
+}
+
+
+def _intel_core_i_year(cpu_name: str) -> int | None:
+    """Launch year of an Intel Core i3/i5/i7/i9 from its model number."""
+    intel_match = re.search(r"i[3579][-\s](\d{4,5})", cpu_name)
+    if not intel_match:
+        return None
+    model_num = intel_match.group(1)
+    if len(model_num) == 5:  # e.g., 12700H -> 12th gen
+        gen = int(model_num[:2])
+    # A 4-digit model with a leading 1 is always a two-digit generation
+    # (1035G1, 1135G7, 1235U, 1355U): first-gen mobile Core i models had three
+    # digits (i5-520M). Checking only 10/11 dated every 12th/13th-gen U and P
+    # chip to 2009, and MIN_YEAR then dropped them from the ranking.
+    elif model_num.startswith("1"):
+        gen = int(model_num[:2])
+    else:  # 2nd-9th gen use a 1-digit prefix: 8550U -> 8th gen
+        gen = int(model_num[0])
+    return _INTEL_GEN_YEARS.get(gen)
+
+
 def estimate_year_from_cpu(cpu_name: str) -> int | None:
     if not cpu_name:
         return None
@@ -95,44 +142,38 @@ def estimate_year_from_cpu(cpu_name: str) -> int | None:
     cpu_name = str(cpu_name).lower()
     current_year = datetime.datetime.now().year
 
-    # Intel Core i-series
-    intel_gen_years = {
-        1: 2009, 2: 2011, 3: 2012, 4: 2013, 5: 2015, 6: 2015, 7: 2016, 8: 2017,
-        9: 2018, 10: 2019, 11: 2021, 12: 2022, 13: 2023, 14: 2024
-    }
-    intel_match = re.search(r"i[3579][-\s](\d{4,5})", cpu_name)
-    if intel_match:
-        model_num = intel_match.group(1)
-        gen = None
-        if len(model_num) == 5: # e.g., 12700H -> 12th gen
-            gen = int(model_num[:2])
-        elif len(model_num) == 4: # e.g., 8550U -> 8th gen, 10210U -> 10th gen
-            if model_num.startswith(('10', '11')): # 10th and 11th gen use 2-digit prefix
-                gen = int(model_num[:2])
-            else: # Older gens use 1-digit prefix
-                gen = int(model_num[0])
-        if gen and gen in intel_gen_years:
-            return intel_gen_years[gen]
+    year = _intel_core_i_year(cpu_name)
+    if year:
+        return year
 
-    # Intel Core Ultra
-    ultra_match = re.search(r"core\sultra\s[3579]\s(\d{3})", cpu_name)
+    # Intel Core Ultra: series 1 (155H) 2024, series 2 (255H, 258V) 2025,
+    # series 3 (Panther Lake) 2026. Plain "Core 5/7" follows the same digit.
+    ultra_match = re.search(r"core\s+(?:ultra\s+)?[3579]\s+([1-3])\d{2}", cpu_name)
     if ultra_match:
-        return 2024 # Core Ultra launched late 2023, widely available 2024
+        return {"1": 2024, "2": 2025, "3": 2026}[ultra_match.group(1)]
+
+    # AMD Ryzen AI: 300 series 2024, AI Max 2025
+    if re.search(r"ryzen\s+ai\s+max", cpu_name):
+        return 2025
+    if re.search(r"ryzen\s+ai\s", cpu_name):
+        return 2024
 
     # AMD Ryzen
     amd_gen_years = {
         1: 2017, 2: 2018, 3: 2019, 4: 2020, 5: 2021, 6: 2022, 7: 2023, 8: 2024
     }
-    amd_match = re.search(r"ryzen\s+[3579]\s+(\d)", cpu_name) # Captures first digit of 4-digit model
+    amd_match = re.search(r"ryzen\s+[3579]\s+(\d)\d{2}(\d)?", cpu_name)
     if amd_match:
+        if amd_match.group(2) is None:  # 3-digit Ryzen 200 series (Ryzen 7 260)
+            return 2025
         gen = int(amd_match.group(1))
         if gen in amd_gen_years:
             return amd_gen_years[gen]
 
     # Apple M-series
-    for chip, year in {"m1": 2020, "m2": 2022, "m3": 2023, "m4": 2024}.items():
-        if chip in cpu_name:
-            return year
+    chip = apple_chip(cpu_name)
+    if chip:
+        return APPLE_CHIP_YEARS[chip]
 
     # Snapdragon
     if "snapdragon" in cpu_name:
@@ -169,7 +210,7 @@ def classify_laptop(cpu: str, gpu_score: int, price: int | float) -> str:
     gpu_score = gpu_score or 0
     price = price or 0
 
-    if any(chip in cpu_l for chip in ("m1", "m2", "m3", "m4")):
+    if apple_chip(cpu_l):
         return "MacBook"
     if gpu_score > 6500:
         return "Gaming"

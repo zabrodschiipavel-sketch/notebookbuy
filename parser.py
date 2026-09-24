@@ -4,10 +4,12 @@ Precompiles patterns for CPU, GPU, RAM, and SSD at import time so
 ``LaptopParser.regex_parse`` runs fast even on large batches.
 """
 
+import datetime
 import re
 from typing import Any
 
 from scoring import (
+    apple_chip,
     classify_laptop,
     estimate_year_from_cpu,
     infer_ssd_gb,
@@ -19,10 +21,12 @@ from scoring import (
 CPU_REGEX = re.compile(
     r'\b('
     r'i[3579][-\s]\d{4,5}(?:[a-z]{1,2}\d?)?'       # Intel Core i7-12700H, i9-13900HX, i5-1135G7
-    r'|core\s+ultra\s+[3579]\s+\d{3,5}[hxug]?'     # Intel Core Ultra 7 155H
-    r'|ryzen\s+[3579]\s+\d{4}[hxusg]{0,3}'         # AMD Ryzen 7 5800H
+    r'|core\s+ultra\s+[3579]\s+\d{3,5}[hxugv]?'    # Intel Core Ultra 7 155H, 258V
+    r'|core\s+[357]\s+\d{3}[uh]?'                  # Intel Core 5 120U, Core 7 150U (no "i")
+    r'|ryzen\s+ai\s+(?:max\+?\s+(?:pro\s+)?\d{3}|(?:pro\s+)?[3579]\s+(?:hx\s+|pro\s+)?\d{3})'  # Ryzen AI 9 HX 370, AI Max+ 395
+    r'|ryzen\s+[3579]\s+\d{3,4}[hxusg]{0,3}'       # AMD Ryzen 7 5800H, Ryzen 7 260
     r'|snapdragon\s*(?:x|8[a-z0-9]*)'              # Snapdragon X Elite, 8cx
-    r'|m[1234]\s*(?:pro|max|ultra)?'               # Apple M1, M2 Pro, M3 Max (will be post-processed for brand)
+    r'|m[1-5]\s*(?:pro|max|ultra)?'                # Apple M1…M5, M2 Pro, M3 Max (post-processed for brand)
     r'|celeron\s*(?:gold|silver)?\s*[a-z0-9]+'     # Intel Celeron N4020
     r'|pentium\s*(?:gold|silver)?\s*[a-z0-9]+'     # Intel Pentium Gold 7505
     r'|xeon\s*[a-z0-9-]+'                          # Intel Xeon E3-1535M
@@ -61,7 +65,11 @@ RAM_REGEX = re.compile(r'\b(4|6|8|12|16|24|32|48|64|128)\s*(?:gb|гб|g)\b')
 _STORAGE_AFTER_RE = re.compile(r'^\s*(?:ssd|nvme|hdd|emmc|ссд|m\.2)')
 # Sizes that belong to GPU VRAM: "RTX 3050Ti 4Gb", "видеокарта 6 гб".
 _GPU_BEFORE_RE = re.compile(r'(?:rtx|gtx|radeon|geforce|vram|video|видео\w*).{0,12}$')
-YEAR_REGEX = re.compile(r'\b(20(?:0[8-9]|1[0-9]|2[0-5]))\b') # Years from 2008 to 2025
+# Years from 2008 up to the current one, built at import: the hardcoded range
+# stopped at 2025 and silently ignored "2026" in this year's listings.
+YEAR_REGEX = re.compile(
+    r'\b(' + '|'.join(str(y) for y in range(datetime.date.today().year, 2007, -1)) + r')\b'
+)
 # "гарантия до 2026" / "garantie pana in 2026" — not the release year.
 _WARRANTY_BEFORE_RE = re.compile(r'(?:гарант\w*|garan\w*|warranty|до|pina|pana|until)[\s:]*$')
 
@@ -137,21 +145,22 @@ class LaptopParser:
         # RAM from every word-boundary regex. Treat them as whitespace.
         full_text = f"{title} {text}".lower().replace("\\n", " ")
 
-        cpu_match = CPU_REGEX.search(full_text)
         gpu_match = GPU_REGEX.search(full_text)
-
-        cpu = cpu_match.group(0).strip() if cpu_match else ""
 
         # An M-chip claim needs Apple context in the *title* (or an explicit
         # "apple m2" in the text). A body mention like "как macbook" or an
         # "ssd m2" used to give a Xiaomi an Apple CPU and its benchmark score.
-        if re.search(r'm[1234]', cpu, re.IGNORECASE):
-            title_l = title.lower()
-            if not (
-                re.search(r'\b(?:apple|macbook|mac|imac)\b', title_l)
-                or re.search(r'apple\s*m[1234]', full_text)
-            ):
-                cpu = ""
+        apple_context = bool(
+            re.search(r'\b(?:apple|macbook|mac|imac)\b', title.lower())
+            or re.search(r'apple\s*m[1-5]', full_text)
+        )
+        # First CPU mention that survives that check. Stopping at the first
+        # match of any kind lost "i5-8250u" behind an earlier "ssd m2".
+        cpu = next(
+            (m.group(0).strip() for m in CPU_REGEX.finditer(full_text)
+             if apple_context or not apple_chip(m.group(0))),
+            "",
+        )
 
         ssd_val = LaptopParser._extract_ssd(full_text)
 
@@ -165,7 +174,7 @@ class LaptopParser:
             if cpu_year and year_est > cpu_year + 2:
                 year_est = cpu_year
 
-        is_apple = bool(re.search(r'm[1234]', cpu, re.IGNORECASE)) or any(
+        is_apple = bool(apple_chip(cpu)) or any(
             w in full_text for w in ['apple', 'macbook']
         )
         ssd_val = infer_ssd_gb(ssd_val, year_est, is_apple)

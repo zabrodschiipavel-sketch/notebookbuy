@@ -39,34 +39,32 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-# Spec extraction — the only path that makes tens of calls a day, so its
-# limiting quota is requests-per-DAY, not per-minute. Pinned deliberately:
-# free-tier RPD varies wildly inside the flash-lite family (3.1 and 3.5 get
-# 500/day, 2.5 gets 20), and an alias gives no way to know which tier it bills
-# against. A pinned model can be retired, but extraction now logs a
-# parsed/failed tally and raises a CI annotation, so that failure is loud.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+def _env_list(key: str, default: str) -> list[str]:
+    return [item.strip() for item in os.getenv(key, default).split(",") if item.strip()]
 
-# Model that sanity-checks the final top before it is sent. This used to
-# default to gemini-pro-latest, whose free-tier quota is 0 — so every single
-# run spent an attempt on a guaranteed failure before falling through to flash.
-# Measured on real listings from past digests, full flash catches noticeably
-# more garbage than flash-lite (3 of 4 planted scams vs 2), which is worth the
-# few extra seconds on a once-a-day call.
-# Set this to a pro model if the key ever gets billing enabled.
-GEMINI_REVIEW_MODEL = os.getenv("GEMINI_REVIEW_MODEL", "gemini-flash-latest")
-# Fallbacks survive a temporary 503 on the primary. An alias leads and a pinned
-# model backs it up: the alias cannot go stale, the pin cannot be silently
-# repointed. (The previous chain ended on gemini-2.5-flash, which now answers
-# 404 "no longer available to new users" — a dead last resort.)
-GEMINI_REVIEW_FALLBACK_MODELS = [
-    m.strip()
-    for m in os.getenv(
-        "GEMINI_REVIEW_FALLBACK_MODEL", "gemini-3.6-flash,gemini-3.1-flash-lite"
-    ).split(",")
-    if m.strip()
-]
+
+# ---- AI: every model call goes through OpenRouter ----
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+# Every AI job here — spec extraction, reading prices out of search snippets,
+# reviewing the digest — asks for JSON, so the primary has to be a free model
+# that honours structured outputs, not just the one ranked highest. Nemotron 3
+# Ultra tops the free usage charts but ignores response_format; Super enforces
+# the schema. The free roster churns monthly: `python openrouter.py` lists what
+# is free right now and flags a configured model that has disappeared.
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL", "nvidia/nemotron-3-super-120b-a12b:free"
+).strip()
+# Tried in order, server-side, within the same request whenever the model before
+# it errors, is rate-limited or is gone. Muse Spark Contributor is not a :free
+# variant — it bills a few cents a month at this volume and needs a positive
+# balance — but it has its own rate limits, so it keeps working once the shared
+# free-model daily quota is spent.
+OPENROUTER_FALLBACK_MODELS = _env_list(
+    "OPENROUTER_FALLBACK_MODELS", "meta/muse-spark-1.3-contributor"
+)
+# The digest review runs once a day and its verdict deletes listings, so it is
+# the one call worth pointing at a stronger model. Defaults to the primary.
+OPENROUTER_REVIEW_MODEL = os.getenv("OPENROUTER_REVIEW_MODEL", "").strip() or OPENROUTER_MODEL
 
 # AI review of the Telegram digest top: catches scam listings and parsing
 # garbage (e.g. "Xiaomi with Apple M2", 128GB RAM from a 128GB SSD).
@@ -93,23 +91,26 @@ DIGEST_PRICE_DROPS_N = max(0, _env_int("DIGEST_PRICE_DROPS_N", 3))
 PRICE_DROP_MIN_PCT = max(1.0, _env_float("PRICE_DROP_MIN_PCT", 10.0))
 PRICE_DROP_MAX_PCT = max(1.0, _env_float("PRICE_DROP_MAX_PCT", 70.0))
 
-GEMINI_MAX_WORKERS = max(1, _env_int("GEMINI_MAX_WORKERS", 3))
-GEMINI_REQUEST_DELAY_SEC = max(0.0, _env_float("GEMINI_REQUEST_DELAY_SEC", 0.5))
-GEMINI_SEARCH_DELAY_SEC = max(0.0, _env_float("GEMINI_SEARCH_DELAY_SEC", 1.5))
-GEMINI_MAX_RETRIES = max(1, _env_int("GEMINI_MAX_RETRIES", 3))
-# Requests per minute allowed *per model*, with headroom for clock skew.
-# The free tier is not one number: flash-lite gets 15 RPM, full flash only 5.
-# Throttling everything at the lite figure would 429 the review on every call.
-GEMINI_RPM_LIMIT = max(1, _env_int("GEMINI_RPM_LIMIT", 12))        # lite, limit 15
-GEMINI_RPM_LIMIT_FULL = max(1, _env_int("GEMINI_RPM_LIMIT_FULL", 4))  # full flash, limit 5
+# OpenRouter caps :free models at 20 requests per minute and — the limit that
+# actually binds — 50 per day, or 1000 per day once $10 of credits has ever been
+# bought. Extraction therefore sends ads in batches: ~60 unparsed ads a morning
+# become ~6 requests instead of 60.
+AI_EXTRACT_BATCH_SIZE = max(1, _env_int("AI_EXTRACT_BATCH_SIZE", 10))
+AI_MAX_WORKERS = max(1, _env_int("AI_MAX_WORKERS", 2))
+AI_RPM_LIMIT = max(1, _env_int("AI_RPM_LIMIT", 16))  # free-model cap is 20
+AI_MAX_RETRIES = max(1, _env_int("AI_MAX_RETRIES", 3))
+AI_RETRY_DELAY_SEC = max(0.1, _env_float("AI_RETRY_DELAY_SEC", 2.0))
+AI_SEARCH_DELAY_SEC = max(0.0, _env_float("AI_SEARCH_DELAY_SEC", 1.5))
 # Longest single back-off. The digest runs once a day, so waiting out the
 # server's suggested delay is cheaper than dropping the ad.
-GEMINI_MAX_BACKOFF_SEC = max(1.0, _env_float("GEMINI_MAX_BACKOFF_SEC", 65.0))
+AI_MAX_BACKOFF_SEC = max(1.0, _env_float("AI_MAX_BACKOFF_SEC", 65.0))
+# Free endpoints queue, and reasoning models think before answering.
+AI_TIMEOUT_SEC = max(10.0, _env_float("AI_TIMEOUT_SEC", 120.0))
 
 ENABLE_EXTERNAL_LOOKUPS = _env_bool("ENABLE_EXTERNAL_LOOKUPS", True)
 
 # Brave Search grounds the world-price and Notebookcheck lookups in real
-# results instead of asking Gemini to recall a price. Free tier: 1 request per
+# results instead of asking a model to recall a price. Free tier: 1 request per
 # second, 2000 per month — and that budget may be shared with other projects
 # using the same key, so lookups stay capped and cached.
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "").strip()
@@ -121,7 +122,19 @@ BRAVE_RESULTS = max(1, _env_int("BRAVE_RESULTS", 5))
 EXTERNAL_MISS_TTL_DAYS = max(1, _env_int("EXTERNAL_MISS_TTL_DAYS", 7))
 
 MIN_CPU_SCORE = _env_int("MIN_CPU_SCORE", DEFAULT_MIN_CPU_SCORE)
-ADS_ANALYZE_LIMIT = max(1, _env_int("ADS_ANALYZE_LIMIT", 500))
+
+# The scrape pages through the whole category. It used to be one 500-ad request,
+# and every listing past it dropped out of the ranking and price tracking.
+SCRAPE_PAGE_SIZE = max(10, _env_int("SCRAPE_PAGE_SIZE", 200))
+SCRAPE_MAX_ADS = max(1, _env_int("SCRAPE_MAX_ADS", 5000))
+SCRAPE_PAGE_DELAY_SEC = max(0.0, _env_float("SCRAPE_PAGE_DELAY_SEC", 1.5))
+# Regex parsing is cheap, so the analyzer looks at everything scraped.
+ADS_ANALYZE_LIMIT = max(1, _env_int("ADS_ANALYZE_LIMIT", SCRAPE_MAX_ADS))
+# AI extraction is not: it draws on the free model's daily request quota,
+# which the price lookups and the digest review share. Ads over this cap wait
+# for the next run (newest first), so a big backlog clears over a few days
+# instead of starving the review.
+AI_EXTRACT_MAX_ADS = max(0, _env_int("AI_EXTRACT_MAX_ADS", 200))
 
 PASSMARK_CACHE_DAYS = max(1, _env_int("PASSMARK_CACHE_DAYS", 7))
 WORLD_PRICE_TOP_N = max(0, _env_int("WORLD_PRICE_TOP_N", 10))

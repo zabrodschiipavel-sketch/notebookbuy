@@ -40,3 +40,37 @@ def test_empty_query_returns_zero():
 def test_no_items_returns_zero():
     b = _bench([])
     assert b.search("i7 12700h") == 0
+
+
+GPU_ITEMS = [
+    {"name": "GeForce 205", "g3d": 126},
+    {"name": "GeForce RTX 3050 Laptop GPU", "g3d": 9500},
+    {"name": "GeForce RTX 2060 (Mobile)", "g3d": 11353},
+    {"name": "GeForce RTX 4060 Laptop GPU", "g3d": 17000},
+    {"name": "NVIDIA A10", "g3d": 15000},
+]
+
+
+def _gpu_bench(items):
+    b = _bench(items)
+    b.hw_type, b.score_key = "gpu", "g3d"
+    return b
+
+
+def test_vendor_prefix_does_not_sink_the_match():
+    """AI extraction writes the vendor, Passmark GPU names mostly omit it.
+    Without the retry these matched 'GeForce 205' and an RTX 2060."""
+    b = _gpu_bench(GPU_ITEMS)
+    assert b.search("NVIDIA GeForce RTX 3050") == 9500
+    assert b.search("NVIDIA RTX 4060") == 17000
+
+
+def test_vendor_retry_needs_a_model_number():
+    """'NVIDIA GeForce' alone names no card; it must not grab one at random."""
+    b = _gpu_bench(GPU_ITEMS)
+    assert b.search("NVIDIA GeForce Graphics") != 9500
+
+
+def test_vendor_word_kept_when_the_name_has_it():
+    b = _gpu_bench(GPU_ITEMS)
+    assert b.search("NVIDIA A10") == 15000

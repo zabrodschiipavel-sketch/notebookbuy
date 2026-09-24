@@ -4,10 +4,14 @@ import logging
 import os
 import re
 import sqlite3
+import sys
+import time
 from datetime import datetime
 
 import requests
 from rapidfuzz import fuzz
+
+import run_summary
 
 # Import shared configurations and scoring
 from app_config import (
@@ -22,13 +26,14 @@ from app_config import (
     PRICE_DROP_MAX_PCT,
     PRICE_DROP_MIN_PCT,
 )
+from currency import usd_to_mdl
 from estimation import (
     estimate_fallback_price,
     estimate_fallback_score,
     external_cache_key,
     plausible_nbc_score,
 )
-from scoring import MDL_USD_RATE, infer_ssd_gb, is_unwanted_ad, score_laptop
+from scoring import apple_chip, infer_ssd_gb, is_rankable, is_unwanted_ad, score_laptop
 
 
 logging.basicConfig(
@@ -116,6 +121,10 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
         if is_unwanted_ad(title, description):
             continue
 
+        # Same bar the analyzer applies before ranking.
+        if not is_rankable(r['cpu_score'], r['year_est'], MIN_CPU_SCORE):
+            continue
+
         brand = extract_brand(title)
         # Smart Normalization
         if any(w in title_lower for w in ['mackbook', 'macbook', 'apple', 'mac']):
@@ -154,7 +163,7 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
                 vs_str = f"{int(round(vs_pct))}%"
                 vs_estimated = True
         else:
-            world_price_mdl = world_price_usd * MDL_USD_RATE
+            world_price_mdl = world_price_usd * usd_to_mdl()
             if world_price_mdl > 0:
                 vs_pct = ((r['price'] - world_price_mdl) / world_price_mdl) * 100
                 vs_str = f"{int(round(vs_pct))}%"
@@ -169,7 +178,8 @@ def process_deals(rows, price_cache, nbc_cache, components_data):
 
         # Risk assessment
         risk = ""
-        if brand == 'Apple' and r['price'] < 12000 and any(chip in title_lower or chip in str(r['cpu']).lower() for chip in ['m2', 'm3', 'm4']):
+        chip = apple_chip(r['cpu']) or apple_chip(title_lower)
+        if brand == 'Apple' and r['price'] < 12000 and chip not in (None, 'm1'):
             risk = "⚠️ Слишком низкая цена! Проверяйте на MDM профиль и iCloud!"
         elif brand == 'Apple' and vs_pct < -55:
             risk = "⚠️ Высокий (Скам/Блок)"
@@ -327,7 +337,7 @@ def update_history(history: dict, sent_deals: list[dict], today: str) -> dict:
 
 
 def apply_ai_review(deals: list[dict], reviews: dict[str, dict]) -> list[dict]:
-    """Apply Gemini Pro verdicts to the deal list.
+    """Apply AI review verdicts to the deal list.
 
     'exclude' drops the deal entirely; other verdicts attach a short note that
     format_deal renders. Deals without a review pass through unchanged, so an
@@ -404,7 +414,7 @@ def format_deal(idx: int, deal: dict, show_region: bool = True) -> str:
     if deal.get('risk'):
         lines.append(f" 🚨 <b>РИСК:</b> <code>{html.escape(deal['risk'])}</code>")
     if deal.get('ai_note'):
-        lines.append(f" 🤖 <b>Gemini:</b> <i>{html.escape(deal['ai_note'])}</i>")
+        lines.append(f" 🤖 <b>AI:</b> <i>{html.escape(deal['ai_note'])}</i>")
     if deal.get('seen_note'):
         lines.append(f" {html.escape(deal['seen_note'])}")
     lines.append(f" 🔗 <a href=\"{html.escape(deal['url'], quote=True)}\">Открыть объявление</a>")
@@ -535,15 +545,48 @@ def build_digest(
     return split_message(header, sections)
 
 
-def main():
+def send_message(url: str, text: str, retries: int = 2) -> bool:
+    """POST one message; retry a 429 after Telegram's retry_after, a 5xx or a
+    network error after a short pause. False when it never got through."""
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    for attempt in range(retries + 1):
+        wait = 3.0
+        try:
+            response = requests.post(url, json=payload, timeout=15)
+            if response.status_code == 200:
+                return True
+            log.error("Telegram rejected the message (%s): %s", response.status_code, response.text[:300])
+            if response.status_code == 429:
+                try:
+                    wait = float(response.json()["parameters"]["retry_after"])
+                except (ValueError, KeyError, TypeError):
+                    pass
+            elif response.status_code < 500:
+                return False  # a 400 (bad markup, wrong chat) fails the same way again
+        except requests.RequestException as e:
+            log.error("Error sending Telegram message: %s", e)
+        if attempt < retries:
+            time.sleep(min(wait, 60.0))
+    return False
+
+
+def main() -> int:
+    """Exit status: 0 when the digest went out or there was honestly nothing to
+    send, 1 when it should have gone out and did not. The workflow used to stay
+    green through a week of undelivered digests."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.error("Telegram configuration missing. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.")
-        return
+        return 1
 
     log.info("Connecting to database and calculating the best deals...")
     if not os.path.exists(DB_NAME):
         log.error("Database %s not found. Cannot send notifications.", DB_NAME)
-        return
+        return 1
 
     # Load caches
     price_cache = load_json_cache(WORLD_PRICE_CACHE)
@@ -567,7 +610,8 @@ def main():
 
     if not deals:
         log.info("No high-value laptop deals found today.")
-        return
+        run_summary.write("Digest", {"candidates": 0, "sent": "nothing to send"})
+        return 0
 
     deals.sort(key=lambda x: x['value_score'], reverse=True)
 
@@ -576,22 +620,24 @@ def main():
     if len(deals) < before:
         log.info("Deduplicated re-posted listings: %d -> %d", before, len(deals))
 
-    # Second-pass review of the top candidates with Gemini Pro: drops scam
+    # Second-pass AI review of the top candidates: drops scam
     # listings and parsing garbage that the regex/score pipeline lets through.
     # The scraper detects price drops on every run and used to only log them.
     # Built before the review so those listings are screened too: a -44% drop
     # on a mislabelled machine is exactly what the screening exists to catch.
     price_drops = build_price_drops(rows)
 
+    review_state = "disabled"
     if ENABLE_AI_REVIEW and AI_REVIEW_TOP_N > 0:
-        # Imported lazily: pulls google-genai, needed only when review is on.
+        # Imported lazily: needed only when review is on.
         from ai_service import AIService
 
         candidates = deals[:AI_REVIEW_TOP_N]
         seen_ids = {str(c["id"]) for c in candidates}
         batch = candidates + [d for d in price_drops if str(d["id"]) not in seen_ids]
-        log.info("Reviewing %d listing(s) with Gemini...", len(batch))
+        log.info("Reviewing %d listing(s) with AI...", len(batch))
         reviews = AIService().review_deals(batch)
+        review_state = f"{len(reviews)} verdicts" if reviews else "failed or skipped — sent unreviewed"
         if reviews:
             deals = apply_ai_review(deals, reviews)
             price_drops = apply_ai_review(price_drops, reviews)
@@ -600,7 +646,8 @@ def main():
 
     if not deals:
         log.info("All candidate deals were rejected by AI review; nothing to send.")
-        return
+        run_summary.write("Digest", {"AI review": review_state, "sent": "all rejected by review"})
+        return 0
 
     # Novelty ordering has to happen before the top-5 cut, otherwise the slice
     # is already full of repeats by the time history is consulted.
@@ -624,29 +671,22 @@ def main():
     log.info("Sending %d message(s) to Telegram...", len(parts))
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    sent_any = False
-    for part in parts:
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": part,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-        try:
-            response = requests.post(url, json=payload, timeout=10)
-            if response.status_code == 200:
-                log.info("Telegram notification sent successfully!")
-                sent_any = True
-            else:
-                log.error("Failed to send message: %s", response.text)
-        except Exception as e:
-            log.error("Error sending Telegram message: %s", e)
+    delivered = sum(send_message(url, part) for part in parts)
+    log.info("Delivered %d of %d message(s)", delivered, len(parts))
+    run_summary.write("Digest", {
+        "deals": len(moldova_deals),
+        f"{DIGEST_REGION} deals": len(balti_deals),
+        "price drops": len(price_drops),
+        "AI review": review_state,
+        "messages delivered": f"{delivered}/{len(parts)}",
+    })
 
-    if sent_any:
+    if delivered:
         history = update_history(history, moldova_deals + balti_deals, today)
         with open(DIGEST_HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=1)
+    return 0 if delivered == len(parts) else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
